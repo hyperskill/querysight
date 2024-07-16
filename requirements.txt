@@ -1,0 +1,3 @@
+clickhouse-driver
+pyyaml
+openai
