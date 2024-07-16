@@ -30,6 +30,8 @@ The project consists of the following main components:
 
 ## Usage
 
+### Console interface
+
 Run the `main.py` script with the necessary arguments:
   python main.py --dbt-project /path/to/dbt/project --start-date 2023-01-01 --end-date 2023-12-31 --openai-api-key your_openai_api_key
 
@@ -38,6 +40,20 @@ Arguments:
 - `--start-date`: Start date for query analysis (YYYY-MM-DD)
 - `--end-date`: End date for query analysis (YYYY-MM-DD)
 - `--openai-api-key`: OpenAI API key
+
+### Streamlit web interface
+Run the Streamlit app:
+  streamlit run streamlit_app.py
+Your default web browser should automatically open to `http://localhost:8501`. If it doesn't, you can manually open this URL.
+
+Use the sidebar to input your configuration:
+- Enter the path to your dbt project
+- Select the start and end dates for query analysis
+- Input your OpenAI API key
+- Provide your ClickHouse credentials
+
+Click the "Analyze and Suggest" button to start the analysis process.
+
 
 ## Workflow
 
