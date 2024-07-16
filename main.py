@@ -14,14 +14,13 @@ def get_clickhouse_credentials() -> Dict[str, str]:
     def clean_input(prompt: str) -> str:
         user_input = input(prompt)
         user_input = user_input.strip()
-        user_input = re.sub(r'[^a-zA-Z0-9.-_]', '', user_input)
         return user_input
 
     return {
         'host': clean_input("Enter ClickHouse host: "),
         'port': int(clean_input("Enter ClickHouse port: ")),
         'username': clean_input("Enter ClickHouse username: "),
-        'password': input("Enter ClickHouse password: ").strip()  # Для пароля оставляем все символы
+        'password': clean_input("Enter ClickHouse password: ")
     }
 
 def main():

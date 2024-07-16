@@ -42,7 +42,7 @@ class ClickHouseDataAcquisition:
         
         for tokens in preprocessed_data:
             # Implement logic to populate the analysis dictionary
-            # This is a simplified example:
+            # This is a simplified example: 
             for i, token in enumerate(tokens):
                 if token == 'from' and i + 1 < len(tokens):
                     analysis['tables'][tokens[i+1]] = analysis['tables'].get(tokens[i+1], 0) + 1
