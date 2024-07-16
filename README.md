@@ -1,4 +1,5 @@
 # QuerySight: ClickHouse Log-Driven dbt Project Enhancer
+# [WORK IN PROGRESS]
 
 This project analyzes ClickHouse query logs and dbt project structure to suggest improvements for optimizing the most common queries and data patterns.
 
