@@ -21,18 +21,18 @@ The project consists of the following main components:
 
 ## Installation
 
-1. Clone the repository:
-  git clone https://github.com/yourusername/clickhouse-dbt-optimizer.git
-  cd clickhouse-dbt-optimizer
+1. Clone the repository:  
+  git clone https://github.com/yourusername/clickhouse-dbt-optimizer.git  
+  cd clickhouse-dbt-optimizer  
 
-2. Install dependencies:
+2. Install dependencies:  
   `pip install -r requirements.txt`
 
 ## Usage
 
 ### Console interface
 
-Run the `main.py` script with the necessary arguments:
+Run the `main.py` script with the necessary arguments:  
   `python main.py --dbt-project /path/to/dbt/project --start-date 2023-01-01 --end-date 2023-12-31 --openai-api-key your_openai_api_key`
 
 Arguments:
