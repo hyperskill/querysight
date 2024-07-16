@@ -18,6 +18,7 @@ The project consists of the following main components:
 - clickhouse-driver
 - PyYAML
 - openai
+- streamlit (optional, in case of using web interface)
 
 ## Installation
 
