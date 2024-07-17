@@ -18,26 +18,43 @@ The project consists of the following main components:
 - clickhouse-driver
 - PyYAML
 - openai
+- streamlit (optional, in case of using web interface)
 
 ## Installation
 
-1. Clone the repository:
-  git clone https://github.com/yourusername/clickhouse-dbt-optimizer.git
-  cd clickhouse-dbt-optimizer
+1. Clone the repository:  
+  git clone https://github.com/yourusername/clickhouse-dbt-optimizer.git  
+  cd clickhouse-dbt-optimizer  
 
-2. Install dependencies:
-  pip install -r requirements.txt
+2. Install dependencies:  
+  `pip install -r requirements.txt`
 
 ## Usage
 
-Run the `main.py` script with the necessary arguments:
-  python main.py --dbt-project /path/to/dbt/project --start-date 2023-01-01 --end-date 2023-12-31 --openai-api-key your_openai_api_key
+### Console interface
+
+Run the `main.py` script with the necessary arguments:  
+  `python main.py --dbt-project /path/to/dbt/project --start-date 2023-01-01 --end-date 2023-12-31 --openai-api-key your_openai_api_key`
 
 Arguments:
 - `--dbt-project`: Path to the dbt project
 - `--start-date`: Start date for query analysis (YYYY-MM-DD)
 - `--end-date`: End date for query analysis (YYYY-MM-DD)
 - `--openai-api-key`: OpenAI API key
+
+### Streamlit web interface
+Run the Streamlit app:  
+  `streamlit run streamlit_app.py`
+Your default web browser should automatically open to `http://localhost:8501`. If it doesn't, you can manually open this URL.
+
+Use the sidebar to input your configuration:
+- Enter the path to your dbt project
+- Select the start and end dates for query analysis
+- Input your OpenAI API key
+- Provide your ClickHouse credentials
+
+Click the "Analyze and Suggest" button to start the analysis process.
+
 
 ## Workflow
 
