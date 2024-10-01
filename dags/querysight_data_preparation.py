@@ -119,15 +119,44 @@ def preprocess_query_logs(**kwargs):
 
     processed_df = pd.DataFrame(processed_data)
 
+    # Преобразуем списки в строки, чтобы вставить в ClickHouse
     processed_df['tables_used'] = processed_df['tables_used'].apply(lambda x: x if isinstance(x, list) else [])
     processed_df['columns_used'] = processed_df['columns_used'].apply(lambda x: x if isinstance(x, list) else [])
     processed_df['functions_used'] = processed_df['functions_used'].apply(lambda x: x if isinstance(x, list) else [])
 
-    processed_df['tables_used'] = processed_df['tables_used'].astype('object')
-    processed_df['columns_used'] = processed_df['columns_used'].astype('object')
-    processed_df['functions_used'] = processed_df['functions_used'].astype('object')
+    # Преобразуем списки в формат JSON для хранения в ClickHouse
+    processed_df['tables_used'] = processed_df['tables_used'].apply(lambda x: json.dumps(x))
+    processed_df['columns_used'] = processed_df['columns_used'].apply(lambda x: json.dumps(x))
+    processed_df['functions_used'] = processed_df['functions_used'].apply(lambda x: json.dumps(x))
 
-    client.insert_df('roman_ianvarev.processed_query_logs', processed_df)
+    # Подготавливаем данные для вставки
+    insert_data = [tuple(row) for row in processed_df.to_records(index=False)]
+
+    # Формируем запрос для вставки данных
+    insert_query = """
+        INSERT INTO roman_ianvarev.processed_query_logs (
+            query_id,
+            query,
+            event_time,
+            user,
+            database,
+            query_duration_ms,
+            rows_read,
+            rows_sent,
+            query_length,
+            table_count,
+            tables_used,
+            columns_used,
+            functions_used,
+            error_code,
+            error_message,
+            memory_usage,
+            disk_io_time
+        ) VALUES
+        """
+
+    # Выполняем вставку данных
+    client.execute(insert_query, insert_data)
     print("Advanced preprocessing completed successfully!")
 
 default_args = {
