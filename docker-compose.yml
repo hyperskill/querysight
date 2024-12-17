@@ -1,0 +1,36 @@
+services:
+  querysight:
+    build: .
+    network_mode: "host"
+    ports:
+      - "8501:8501"
+    environment:
+      - CLICKHOUSE_HOST=localhost
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-default}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DBT_PROJECT_PATH=/app/dbt_project
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./logs:/app/logs
+      - ~/.ssh:/root/.ssh:ro
+      - ${DBT_PROJECT_PATH}:/app/dbt_project:ro
+      - ./.cache:/app/.cache
+
+# Optional ClickHouse service (uncomment if you need a local ClickHouse instance)
+#  clickhouse:
+#    image: clickhouse/clickhouse-server:latest
+#    ports:
+#      - "8123:8123"  # HTTP port
+#      - "9000:9000"  # Native port
+#    volumes:
+#      - clickhouse_data:/var/lib/clickhouse
+#    environment:
+#      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+#      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+#      - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-default}
+#
+#volumes:
+#  clickhouse_data:
