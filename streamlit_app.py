@@ -10,6 +10,7 @@ from utils.pdf_generator import PDFReportGenerator
 from utils.logger import setup_logger
 from utils.config import Config
 from utils.sampling_wizard import SamplingWizard
+import altair as alt
 
 # Set up logger for this module
 logger = setup_logger(__name__, log_level="DEBUG")
@@ -19,13 +20,17 @@ def init_session_state():
     if 'analysis_results' not in st.session_state:
         st.session_state.analysis_results = None
     if 'query_patterns' not in st.session_state:
-        st.session_state.query_patterns = None
+        st.session_state.query_patterns = []  # Initialize as empty list instead of None
     if 'processed_patterns' not in st.session_state:
         st.session_state.processed_patterns = set()
     if 'accumulated_suggestions' not in st.session_state:
         st.session_state.accumulated_suggestions = []
     if 'current_sampling_config' not in st.session_state:
         st.session_state.current_sampling_config = None
+    if 'selected_patterns' not in st.session_state:
+        st.session_state.selected_patterns = set()
+    if 'can_suggest' not in st.session_state:
+        st.session_state.can_suggest = False
 
 def render_sidebar():
     """Render the configuration sidebar"""
@@ -147,7 +152,7 @@ def main():
             with col2:
                 suggest_button = st.button(
                     "🤖 Generate AI Suggestions",
-                    disabled=not st.session_state.query_patterns,
+                    disabled=not st.session_state.can_suggest,
                     use_container_width=True
                 )
             
@@ -197,7 +202,7 @@ def main():
                             
                             if query_result['data']:
                                 current_patterns = data_acquisition.analyze_query_patterns(query_result['data'])
-                                st.session_state.query_patterns = current_patterns
+                                st.session_state.query_patterns.extend(current_patterns)
                             
                             query_result = data_acquisition.get_query_logs(
                                 start_date=sampling_config.start_date,
@@ -209,11 +214,78 @@ def main():
                                 query_types=sampling_config.query_types
                             )
                         
-                        # Final update
+                        # Process final batch if it exists
+                        if query_result['data']:
+                            final_patterns = data_acquisition.analyze_query_patterns(query_result['data'])
+                            st.session_state.query_patterns.extend(final_patterns)
+                        
+                        # Final progress update
                         progress_bar.progress(1.0)
-                        total_patterns = len(st.session_state.query_patterns) if st.session_state.query_patterns else 0
+                        total_patterns = len(st.session_state.query_patterns)
                         if total_patterns > 0:
                             st.success(f"✅ Found {total_patterns} distinct query patterns")
+                            
+                            # Display query patterns analysis
+                            st.markdown("### 📈 Query Patterns Analysis")
+                            
+                            # Group patterns by model/table
+                            patterns_by_model = {}
+                            for pattern in st.session_state.query_patterns:
+                                model_name = pattern.get('model_name', 'Unknown')
+                                if model_name not in patterns_by_model:
+                                    patterns_by_model[model_name] = []
+                                patterns_by_model[model_name].append(pattern)
+                            
+                            # Create tabs for different views
+                            tab_models, tab_metrics = st.tabs(["🏗️ By Model", "📊 Metrics"])
+                            
+                            with tab_models:
+                                for model_name, patterns in patterns_by_model.items():
+                                    with st.expander(f"📁 {model_name} ({len(patterns)} patterns)"):
+                                        for pattern in patterns:
+                                            pattern_id = f"{model_name}:{pattern['pattern']}"
+                                            if st.checkbox(
+                                                "Select for AI Analysis",
+                                                key=f"select_{pattern_id}",
+                                                value=pattern_id in st.session_state.selected_patterns
+                                            ):
+                                                st.session_state.selected_patterns.add(pattern_id)
+                                            else:
+                                                st.session_state.selected_patterns.discard(pattern_id)
+                                            
+                                            # Pattern details
+                                            st.code(pattern['pattern'], language="sql")
+                                            col1, col2, col3 = st.columns(3)
+                                            with col1:
+                                                st.metric("Frequency", f"{pattern['frequency']:,}")
+                                            with col2:
+                                                st.metric("Avg Duration", f"{pattern['avg_duration']:.2f}s")
+                                            with col3:
+                                                st.metric("Max Duration", f"{pattern['max_duration']:.2f}s")
+                            
+                            with tab_metrics:
+                                # Prepare data for charts
+                                chart_data = pd.DataFrame(st.session_state.query_patterns)
+                                
+                                # Frequency distribution
+                                st.markdown("#### Query Frequency Distribution")
+                                freq_chart = alt.Chart(chart_data).mark_bar().encode(
+                                    x=alt.X('frequency', bin=True),
+                                    y='count()'
+                                ).properties(height=200)
+                                st.altair_chart(freq_chart, use_container_width=True)
+                                
+                                # Duration distribution
+                                st.markdown("#### Query Duration Distribution")
+                                dur_chart = alt.Chart(chart_data).mark_bar().encode(
+                                    x=alt.X('avg_duration', bin=True),
+                                    y='count()'
+                                ).properties(height=200)
+                                st.altair_chart(dur_chart, use_container_width=True)
+                            
+                            # Update suggest button state based on selection
+                            st.session_state.can_suggest = len(st.session_state.selected_patterns) > 0
+                            
                         else:
                             st.error("❌ No query patterns found in the selected date range")
                 
@@ -237,17 +309,17 @@ def main():
                         dbt_analyzer = DBTProjectAnalyzer(config['dbt_project_path'])
                         ai_suggester = AISuggester(config['openai_api_key'])
                         
-                        # Get unprocessed patterns
-                        all_patterns = st.session_state.query_patterns
-                        unprocessed_patterns = [
-                            p for p in all_patterns 
-                            if p['pattern'] not in st.session_state.processed_patterns
-                        ]
+                        # Get selected patterns
+                        selected_patterns = []
+                        for pattern in st.session_state.query_patterns:
+                            pattern_id = f"{pattern.get('model_name', 'Unknown')}:{pattern['pattern']}"
+                            if pattern_id in st.session_state.selected_patterns:
+                                selected_patterns.append(pattern)
                         
-                        if unprocessed_patterns:
-                            total_batches = (len(unprocessed_patterns) + config['max_patterns'] - 1) // config['max_patterns']
+                        if selected_patterns:
+                            total_batches = (len(selected_patterns) + config['max_patterns'] - 1) // config['max_patterns']
                             for batch in range(total_batches):
-                                batch_patterns = unprocessed_patterns[batch * config['max_patterns']:(batch + 1) * config['max_patterns']]
+                                batch_patterns = selected_patterns[batch * config['max_patterns']:(batch + 1) * config['max_patterns']]
                                 progress = (batch + 1) / total_batches
                                 progress_bar.progress(progress)
                                 status_text.text(f"Analyzing batch {batch + 1} of {total_batches}...")
@@ -265,7 +337,7 @@ def main():
                             st.session_state.analysis_results = st.session_state.accumulated_suggestions
                             st.success(f"✅ Generated {len(st.session_state.accumulated_suggestions)} suggestions")
                         else:
-                            st.info("ℹ️ All patterns have been analyzed")
+                            st.error("❌ No patterns selected for analysis")
                 
                 except Exception as e:
                     st.error(f"❌ AI analysis error: {str(e)}")

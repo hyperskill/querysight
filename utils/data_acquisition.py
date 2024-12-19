@@ -385,40 +385,44 @@ class ClickHouseDataAcquisition:
             # Remove literals
             query = re.sub(r"'[^']*'", "'?'", query)
             query = re.sub(r"\d+", "?", query)
+            # Extract model name if present
+            model_match = re.search(r'FROM\s+([a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)', query, re.IGNORECASE)
+            model_name = model_match.group(2) if model_match else 'Unknown'
             # Remove whitespace
             query = " ".join(query.split())
-            return query
+            return query, model_name
 
         for log in query_logs:
             query = log['query']
-            normalized_query = normalize_query(query)
+            normalized_query, model_name = normalize_query(query)
             
             if normalized_query in patterns:
-                patterns[normalized_query]['count'] += 1
+                patterns[normalized_query]['frequency'] += 1
                 patterns[normalized_query]['total_duration'] += log['query_duration_ms']
+                if log['query_duration_ms'] > patterns[normalized_query]['max_duration']:
+                    patterns[normalized_query]['max_duration'] = log['query_duration_ms']
                 patterns[normalized_query]['total_read_rows'] += log['read_rows']
                 patterns[normalized_query]['total_read_bytes'] += log['read_bytes']
             else:
                 patterns[normalized_query] = {
-                    'count': 1,
+                    'pattern': normalized_query,
+                    'model_name': model_name,
+                    'frequency': 1,
                     'total_duration': log['query_duration_ms'],
+                    'max_duration': log['query_duration_ms'],
                     'total_read_rows': log['read_rows'],
-                    'total_read_bytes': log['read_bytes'],
-                    'example_query': query
+                    'total_read_bytes': log['read_bytes']
                 }
 
         # Convert to list and calculate averages
-        pattern_list = []
-        for pattern, stats in patterns.items():
-            pattern_list.append({
-                'pattern': pattern,
-                'frequency': stats['count'],
-                'avg_duration_ms': stats['total_duration'] / stats['count'],
-                'avg_read_rows': stats['total_read_rows'] / stats['count'],
-                'avg_read_bytes': stats['total_read_bytes'] / stats['count'],
-                'example_query': stats['example_query']
-            })
-
-        # Sort by frequency
-        pattern_list.sort(key=lambda x: x['frequency'], reverse=True)
-        return pattern_list
+        result = []
+        for pattern in patterns.values():
+            pattern['avg_duration'] = pattern['total_duration'] / pattern['frequency'] / 1000  # Convert to seconds
+            pattern['max_duration'] = pattern['max_duration'] / 1000  # Convert to seconds
+            pattern['avg_read_rows'] = pattern['total_read_rows'] / pattern['frequency']
+            pattern['avg_read_bytes'] = pattern['total_read_bytes'] / pattern['frequency']
+            result.append(pattern)
+        
+        # Sort by frequency and duration
+        result.sort(key=lambda x: (-x['frequency'], -x['avg_duration']))
+        return result
