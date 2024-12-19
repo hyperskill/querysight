@@ -118,11 +118,18 @@ def main():
             # Only show sampling wizard if config is valid
             if config['is_valid_config']:
                 wizard = SamplingWizard()
-                st.session_state.current_sampling_config = wizard.render_wizard()
+                config_result = wizard.render_wizard()
+                # Debug logging
+                st.session_state.current_sampling_config = config_result
+                if config_result:
+                    st.success("✅ Sampling configuration completed and saved!")
+                    st.write("Debug - Config:", config_result)
             else:
                 st.warning("⚠️ Please complete the configuration in the sidebar first")
         
         with tab_analysis:
+            # Debug logging
+            st.write("Debug - Current config:", st.session_state.current_sampling_config)
             if not st.session_state.current_sampling_config:
                 st.warning("⚠️ Please complete the sampling setup first")
                 return
