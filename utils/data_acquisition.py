@@ -72,11 +72,27 @@ class ClickHouseDataAcquisition:
                 - error: Optional error message
         """
         try:
-            logger.info(f"Starting query log retrieval with sample_size={sample_size}")
+            # Validate input parameters
+            if start_date > end_date:
+                return {
+                    'status': 'error',
+                    'data': [],
+                    'error': 'Start date must be before end date',
+                    'total_rows': 0,
+                    'loaded_rows': 0
+                }
+
+            logger.info(f"Starting query log retrieval with parameters: start_date={start_date}, end_date={end_date}, sample_size={sample_size}, user_include={user_include}, query_types={query_types}, query_focus={query_focus}")
             
             # Validate sample size
             if not 0 < sample_size <= 1:
-                raise ValueError("Sample size must be between 0 and 1")
+                return {
+                    'status': 'error',
+                    'data': [],
+                    'error': 'Sample size must be between 0 and 1',
+                    'total_rows': 0,
+                    'loaded_rows': 0
+                }
                 
             # Try to get data from cache first
             cached_df = self.cache_manager.get_cached_data(start_date, end_date)
@@ -92,10 +108,6 @@ class ClickHouseDataAcquisition:
                     'sampling_rate': sample_size
                 }
 
-            # If cache miss, fetch from ClickHouse
-            sampling_clause = f"SAMPLE {sample_size:.4f}" if sample_size < 1.0 else ""
-            logger.debug(f"Using sampling clause: {sampling_clause}")
-            
             # Build the WHERE clause dynamically
             where_clauses = [
                 "query_start_time BETWEEN %(start_date)s AND %(end_date)s",
@@ -104,23 +116,45 @@ class ClickHouseDataAcquisition:
                 "query NOT LIKE '%%SELECT 1%%'"
             ]
             
+            params = {
+                'start_date': start_date,
+                'end_date': end_date,
+                'min_duration': 1000,  # Default for slow queries
+                'min_frequency': 10    # Default for frequent queries
+            }
+            
+            logger.debug(f"Initial params: {params}")
+            
             # Add user filters
             if user_include:
-                where_clauses.append(f"user IN ({','.join(['%s' for _ in user_include])})")
+                placeholders = [f"%(user_include_{i})s" for i in range(len(user_include))]
+                where_clauses.append(f"user IN ({','.join(placeholders)})")
+                for i, user in enumerate(user_include):
+                    params[f'user_include_{i}'] = user
+                logger.debug(f"Added user include filters: {params}")
+
             if user_exclude:
-                where_clauses.append(f"user NOT IN ({','.join(['%s' for _ in user_exclude])})")
+                placeholders = [f"%(user_exclude_{i})s" for i in range(len(user_exclude))]
+                where_clauses.append(f"user NOT IN ({','.join(placeholders)})")
+                for i, user in enumerate(user_exclude):
+                    params[f'user_exclude_{i}'] = user
+                logger.debug(f"Added user exclude filters: {params}")
                 
             # Add query type filters
             if query_types and 'All' not in query_types:
                 type_conditions = []
-                for qtype in query_types:
-                    type_conditions.append(f"query ILIKE '%%{qtype}%%'")
+                for i, qtype in enumerate(query_types):
+                    param_name = f'query_type_{i}'
+                    type_conditions.append(f"query ILIKE %(query_type_{i})s")
+                    params[param_name] = f'%%{qtype}%%'
                 where_clauses.append(f"({' OR '.join(type_conditions)})")
+                logger.debug(f"Added query type filters: {params}")
                 
             # Add performance filters
             if query_focus and 'All Queries' not in query_focus:
                 if 'Slow Queries' in query_focus:
-                    where_clauses.append("query_duration_ms > 1000")  # Queries taking more than 1 second
+                    where_clauses.append("query_duration_ms > %(min_duration)s")
+                    params['min_duration'] = 1000  # Override default for slow queries
                 if 'Frequent Queries' in query_focus:
                     # This requires a subquery to count query occurrences
                     where_clauses.append("""
@@ -129,9 +163,16 @@ class ClickHouseDataAcquisition:
                             FROM system.query_log 
                             WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
                             GROUP BY normalized_query_hash 
-                            HAVING count() > 10
+                            HAVING count() > %(min_frequency)s
                         )
                     """)
+                    params['min_frequency'] = 10  # Override default for frequent queries
+                logger.debug(f"Added performance filters: {params}")
+            
+            # Apply sampling at the application level instead of using SAMPLE clause
+            limit_with_sampling = int(batch_size / sample_size) if sample_size < 1.0 else batch_size
+            params['limit'] = limit_with_sampling
+            params['offset'] = 0
             
             query = f"""
             SELECT
@@ -147,17 +188,12 @@ class ClickHouseDataAcquisition:
                 result_bytes,
                 memory_usage,
                 normalized_query_hash
-            FROM system.query_log{' ' + sampling_clause if sampling_clause else ''}
+            FROM system.query_log
             WHERE {' AND '.join(where_clauses)}
             ORDER BY query_start_time DESC
             LIMIT %(limit)s
             OFFSET %(offset)s
             """
-            
-            params = {
-                'start_date': start_date,
-                'end_date': end_date
-            }
             
             try:
                 offset = 0
@@ -165,20 +201,37 @@ class ClickHouseDataAcquisition:
                 total_count_query = f"""
                     SELECT count(*)
                     FROM system.query_log
-                    WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
-                        AND type = 'QueryStart'
-                        AND query NOT LIKE '%%system.query_log%%'
-                        AND query NOT LIKE '%%SELECT 1%%'
+                    WHERE {' AND '.join(where_clauses)}
                 """
                 
                 # Get total count first
-                total_count = self.client.execute(total_count_query, params)[0][0]
+                try:
+                    total_count = self.client.execute(total_count_query, params)[0][0]
+                    logger.debug(f"Total count: {total_count}")
+                    
+                    # If no rows found, return early
+                    if total_count == 0:
+                        return {
+                            'status': 'completed',
+                            'data': [],
+                            'total_rows': 0,
+                            'loaded_rows': 0
+                        }
+                except Exception as e:
+                    logger.error(f"Failed to get total count: {str(e)}")
+                    return {
+                        'status': 'error',
+                        'data': [],
+                        'error': f"Failed to get total count: {str(e)}",
+                        'total_rows': 0,
+                        'loaded_rows': 0
+                    }
                 
                 while offset < total_count:
                     try:
                         batch_params = {
                             **params,
-                            'limit': batch_size,
+                            'limit': limit_with_sampling,
                             'offset': offset
                         }
                         
@@ -208,17 +261,45 @@ class ClickHouseDataAcquisition:
                                 logger.error(f"Failed query: {query}")
                                 retry_count += 1
                                 if retry_count == max_retries:
-                                    return {
-                                        'status': 'error',
-                                        'data': [],
-                                        'error': f"Failed to execute query after {max_retries} retries: {str(e)}",
-                                        'total_rows': total_count,
-                                        'loaded_rows': len(all_rows)
-                                    }
+                                    if len(all_rows) > 0:
+                                        # If we have some data, return it with error status
+                                        return {
+                                            'status': 'error',
+                                            'data': all_rows,
+                                            'error': f"Failed to execute query after {max_retries} retries: {str(e)}",
+                                            'total_rows': total_count,
+                                            'loaded_rows': len(all_rows)
+                                        }
+                                    else:
+                                        # If we have no data, return empty result with error
+                                        return {
+                                            'status': 'error',
+                                            'data': [],
+                                            'error': f"Failed to execute query after {max_retries} retries: {str(e)}",
+                                            'total_rows': 0,
+                                            'loaded_rows': 0
+                                        }
                                 time.sleep(1)
                         
                         if result is None:
-                            raise Exception("Failed to execute query after retries")
+                            if len(all_rows) > 0:
+                                # If we have some data, return it with error status
+                                return {
+                                    'status': 'error',
+                                    'data': all_rows,
+                                    'error': "Failed to execute query after retries",
+                                    'total_rows': total_count,
+                                    'loaded_rows': len(all_rows)
+                                }
+                            else:
+                                # If we have no data, return empty result with error
+                                return {
+                                    'status': 'error',
+                                    'data': [],
+                                    'error': "Failed to execute query after retries",
+                                    'total_rows': 0,
+                                    'loaded_rows': 0
+                                }
                         
                         rows, columns = result
                         batch_rows = []
@@ -238,6 +319,12 @@ class ClickHouseDataAcquisition:
                                 'normalized_query_hash': row[11]
                             }
                             batch_rows.append(processed_row)
+                        
+                        # Apply sampling at application level
+                        if sample_size < 1.0:
+                            import random
+                            random.seed(42)  # For reproducibility
+                            batch_rows = random.sample(batch_rows, int(len(batch_rows) * sample_size))
                         
                         all_rows.extend(batch_rows)
                         offset += batch_size
@@ -278,7 +365,7 @@ class ClickHouseDataAcquisition:
                 }
 
         except Exception as e:
-            error_msg = f"Failed to process query logs: {str(e)}"
+            error_msg = f"Unexpected error in get_query_logs: {str(e)}"
             logger.error(error_msg)
             return {
                 'status': 'error',

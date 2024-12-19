@@ -48,7 +48,7 @@ class QueryLogsCacheManager:
         last_update = datetime.fromisoformat(metadata["last_update"])
         
         # Check if cache is too old (more than 1 hour)
-        if datetime.now() - last_update > timedelta(hours=1):
+        if (datetime.now() - last_update) > timedelta(hours=1):
             return None
 
         try:
