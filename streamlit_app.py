@@ -119,11 +119,17 @@ def main():
             if config['is_valid_config']:
                 wizard = SamplingWizard()
                 config_result = wizard.render_wizard()
-                # Debug logging
-                st.session_state.current_sampling_config = config_result
-                if config_result:
+                
+                # Update the current sampling config if we have a result
+                if config_result is not None:
+                    st.session_state.current_sampling_config = config_result
                     st.success("✅ Sampling configuration completed and saved!")
                     st.write("Debug - Config:", config_result)
+                # If we have a saved config from previous run, show it
+                elif hasattr(st.session_state, 'sampling_config') and st.session_state.sampling_config is not None:
+                    st.session_state.current_sampling_config = st.session_state.sampling_config
+                    st.success("✅ Using previously saved sampling configuration")
+                    st.write("Debug - Config:", st.session_state.sampling_config)
             else:
                 st.warning("⚠️ Please complete the configuration in the sidebar first")
         

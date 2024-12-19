@@ -231,6 +231,7 @@ class SamplingWizard:
                     query_focus=query_focus,
                     query_types=st.session_state.query_types
                 )
+                st.session_state.sampling_config = config  # Store in session state
                 return config
 
         # Show Summary
