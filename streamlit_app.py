@@ -224,7 +224,8 @@ def main():
                         total_patterns = len(st.session_state.query_patterns)
                         if total_patterns > 0:
                             st.success(f"✅ Found {total_patterns} distinct query patterns")
-                            
+                            st.session_state.can_suggest = True
+                        
                             # Display query patterns analysis
                             st.markdown("### 📈 Query Patterns Analysis")
                             
