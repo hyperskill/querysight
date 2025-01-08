@@ -10,6 +10,10 @@ from utils.pdf_generator import PDFReportGenerator
 from utils.logger import setup_logger
 from utils.config import Config
 from utils.sampling_wizard import SamplingWizard
+from utils.visualization import (
+    render_analysis_dashboard,
+    render_recommendations
+)
 import altair as alt
 
 # Set up logger for this module
@@ -117,7 +121,11 @@ def main():
         config = render_sidebar()
         
         # Main workflow tabs
-        tab_setup, tab_analysis = st.tabs(["🎯 Setup", "📊 Analysis"])
+        tab_setup, tab_analysis, tab_recommendations = st.tabs([
+            "🎯 Setup",
+            "📊 Analysis",
+            "🤖 Recommendations"
+        ])
         
         with tab_setup:
             # Only show sampling wizard if config is valid
@@ -128,19 +136,11 @@ def main():
                 # Update the current sampling config if we have a result
                 if config_result is not None:
                     st.session_state.current_sampling_config = config_result
-                    st.success("✅ Sampling configuration completed and saved!")
-                    st.write("Debug - Config:", config_result)
-                # If we have a saved config from previous run, show it
-                elif hasattr(st.session_state, 'sampling_config') and st.session_state.sampling_config is not None:
-                    st.session_state.current_sampling_config = st.session_state.sampling_config
-                    st.success("✅ Using previously saved sampling configuration")
-                    st.write("Debug - Config:", st.session_state.sampling_config)
+                    st.success("✅ Sampling configuration completed!")
             else:
                 st.warning("⚠️ Please complete the configuration in the sidebar first")
         
         with tab_analysis:
-            # Debug logging
-            st.write("Debug - Current config:", st.session_state.current_sampling_config)
             if not st.session_state.current_sampling_config:
                 st.warning("⚠️ Please complete the sampling setup first")
                 return
@@ -150,27 +150,12 @@ def main():
             with col1:
                 analyze_button = st.button("🔍 Analyze Query Patterns", use_container_width=True)
             with col2:
-                suggest_button = st.button(
-                    "🤖 Generate AI Suggestions",
-                    disabled=not st.session_state.can_suggest,
-                    use_container_width=True
-                )
+                suggest_button = st.button("💡 Generate Suggestions", use_container_width=True)
             
-            # Progress tracking
-            progress_placeholder = st.empty()
-            
-            if analyze_button:
-                if not all([config['ch_host'], config['ch_user'], config['ch_password'], config['ch_database']]):
-                    st.error("❌ Please fill in all ClickHouse connection fields")
-                    return
-                    
-                try:
-                    with progress_placeholder.container():
-                        st.markdown("### 📊 Analysis Progress")
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Initialize components
+            if analyze_button or 'analysis_result' in st.session_state:
+                with st.spinner("Analyzing query patterns..."):
+                    if analyze_button or st.session_state.analysis_result is None:
+                        # Get query logs
                         data_acquisition = ClickHouseDataAcquisition(
                             host=config['ch_host'],
                             port=config['ch_port'],
@@ -179,320 +164,58 @@ def main():
                             database=config['ch_database']
                         )
                         
-                        sampling_config = st.session_state.current_sampling_config
-                        
-                        # Get and analyze query logs
-                        query_result = data_acquisition.get_query_logs(
-                            start_date=sampling_config.start_date,
-                            end_date=sampling_config.end_date,
-                            sample_size=sampling_config.sample_size,
-                            user_include=sampling_config.user_include,
-                            user_exclude=sampling_config.user_exclude,
-                            query_focus=sampling_config.query_focus,
-                            query_types=sampling_config.query_types
+                        logs_result = data_acquisition.get_query_logs(
+                            start_date=st.session_state.current_sampling_config.start_date,
+                            end_date=st.session_state.current_sampling_config.end_date,
+                            sample_size=st.session_state.current_sampling_config.sample_size,
+                            user_include=st.session_state.current_sampling_config.user_include,
+                            user_exclude=st.session_state.current_sampling_config.user_exclude,
+                            query_focus=st.session_state.current_sampling_config.query_focus,
+                            query_types=st.session_state.current_sampling_config.query_types
                         )
                         
-                        while query_result['status'] == 'in_progress':
-                            progress = query_result['loaded_rows'] / query_result['total_rows']
-                            progress_bar.progress(progress)
-                            status_text.text(
-                                f"Loading... {query_result['loaded_rows']:,} / {query_result['total_rows']:,} rows"
-                                f"{' (Sampling)' if sampling_config.sample_size < 1.0 else ''}"
-                            )
-                            
-                            if query_result['data']:
-                                current_patterns = data_acquisition.analyze_query_patterns(query_result['data'])
-                                st.session_state.query_patterns.extend(current_patterns)
-                            
-                            query_result = data_acquisition.get_query_logs(
-                                start_date=sampling_config.start_date,
-                                end_date=sampling_config.end_date,
-                                sample_size=sampling_config.sample_size,
-                                user_include=sampling_config.user_include,
-                                user_exclude=sampling_config.user_exclude,
-                                query_focus=sampling_config.query_focus,
-                                query_types=sampling_config.query_types
-                            )
+                        if logs_result['status'] == 'error':
+                            st.error(f"Error retrieving logs: {logs_result['error']}")
+                            return
                         
-                        # Process final batch if it exists
-                        if query_result['data']:
-                            final_patterns = data_acquisition.analyze_query_patterns(query_result['data'])
-                            st.session_state.query_patterns.extend(final_patterns)
+                        # Analyze patterns
+                        patterns = data_acquisition.analyze_query_patterns(logs_result['data'])
                         
-                        # Final progress update
-                        progress_bar.progress(1.0)
-                        total_patterns = len(st.session_state.query_patterns)
-                        if total_patterns > 0:
-                            st.success(f"✅ Found {total_patterns} distinct query patterns")
-                            st.session_state.can_suggest = True
-                        
-                            # Display query patterns analysis
-                            st.markdown("### 📈 Query Patterns Analysis")
-                            
-                            # Group patterns by model/table
-                            patterns_by_model = {}
-                            for pattern in st.session_state.query_patterns:
-                                model_name = pattern.get('model_name', 'Unknown')
-                                if model_name not in patterns_by_model:
-                                    patterns_by_model[model_name] = []
-                                patterns_by_model[model_name].append(pattern)
-                            
-                            # Create tabs for different views
-                            tab_models, tab_metrics = st.tabs(["🏗️ By Model", "📊 Metrics"])
-                            
-                            with tab_models:
-                                for model_name, patterns in patterns_by_model.items():
-                                    with st.expander(f"📁 {model_name} ({len(patterns)} patterns)"):
-                                        for pattern in patterns:
-                                            pattern_id = f"{model_name}:{pattern['pattern']}"
-                                            if st.checkbox(
-                                                "Select for AI Analysis",
-                                                key=f"select_{pattern_id}",
-                                                value=pattern_id in st.session_state.selected_patterns
-                                            ):
-                                                st.session_state.selected_patterns.add(pattern_id)
-                                            else:
-                                                st.session_state.selected_patterns.discard(pattern_id)
-                                            
-                                            # Pattern details
-                                            st.code(pattern['pattern'], language="sql")
-                                            col1, col2, col3 = st.columns(3)
-                                            with col1:
-                                                st.metric("Frequency", f"{pattern['frequency']:,}")
-                                            with col2:
-                                                st.metric("Avg Duration", f"{pattern['avg_duration']:.2f}s")
-                                            with col3:
-                                                st.metric("Max Duration", f"{pattern['max_duration']:.2f}s")
-                            
-                            with tab_metrics:
-                                # Prepare data for charts
-                                chart_data = pd.DataFrame(st.session_state.query_patterns)
-                                
-                                # Frequency distribution
-                                st.markdown("#### Query Frequency Distribution")
-                                freq_chart = alt.Chart(chart_data).mark_bar().encode(
-                                    x=alt.X('frequency', bin=True),
-                                    y='count()'
-                                ).properties(height=200)
-                                st.altair_chart(freq_chart, use_container_width=True)
-                                
-                                # Duration distribution
-                                st.markdown("#### Query Duration Distribution")
-                                dur_chart = alt.Chart(chart_data).mark_bar().encode(
-                                    x=alt.X('avg_duration', bin=True),
-                                    y='count()'
-                                ).properties(height=200)
-                                st.altair_chart(dur_chart, use_container_width=True)
-                            
-                            # Update suggest button state based on selection
-                            st.session_state.can_suggest = len(st.session_state.selected_patterns) > 0
-                            
-                        else:
-                            st.error("❌ No query patterns found in the selected date range")
-                
-                except Exception as e:
-                    st.error(f"❌ Analysis error: {str(e)}")
-                    logger.error(f"Analysis error: {traceback.format_exc()}")
-                    return
-            
-            if suggest_button:
-                if not all([config['dbt_project_path'], config['openai_api_key']]):
-                    st.error("❌ Please provide both dbt project path and OpenAI API key")
-                    return
-                
-                try:
-                    with progress_placeholder.container():
-                        st.markdown("### 🤖 AI Analysis Progress")
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Initialize components
+                        # Analyze dbt project
                         dbt_analyzer = DBTProjectAnalyzer(config['dbt_project_path'])
-                        ai_suggester = AISuggester(config['openai_api_key'])
+                        analysis_result = dbt_analyzer.analyze_project()
                         
-                        # Get selected patterns
-                        selected_patterns = []
-                        for pattern in st.session_state.query_patterns:
-                            pattern_id = f"{pattern.get('model_name', 'Unknown')}:{pattern['pattern']}"
-                            if pattern_id in st.session_state.selected_patterns:
-                                selected_patterns.append(pattern)
+                        # Update analysis result with patterns
+                        analysis_result.query_patterns = patterns
+                        analysis_result.calculate_coverage()
                         
-                        if selected_patterns:
-                            total_batches = (len(selected_patterns) + config['max_patterns'] - 1) // config['max_patterns']
-                            for batch in range(total_batches):
-                                batch_patterns = selected_patterns[batch * config['max_patterns']:(batch + 1) * config['max_patterns']]
-                                progress = (batch + 1) / total_batches
-                                progress_bar.progress(progress)
-                                status_text.text(f"Analyzing batch {batch + 1} of {total_batches}...")
-                                
-                                suggestions = ai_suggester.generate_suggestions(
-                                    query_patterns=batch_patterns,
-                                    dbt_structure=dbt_analyzer.analyze_project(),
-                                    max_patterns=config['max_patterns'],
-                                    max_tokens=config['max_tokens']
-                                )
-                                
-                                st.session_state.processed_patterns.update(p['pattern'] for p in batch_patterns)
-                                st.session_state.accumulated_suggestions.extend(suggestions)
-                            
-                            st.session_state.analysis_results = st.session_state.accumulated_suggestions
-                            st.success(f"✅ Generated {len(st.session_state.accumulated_suggestions)} suggestions")
-                        else:
-                            st.error("❌ No patterns selected for analysis")
-                
-                except Exception as e:
-                    st.error(f"❌ AI analysis error: {str(e)}")
-                    logger.error(f"AI analysis error: {traceback.format_exc()}")
-                    return
-            
-            # Display results
-            if st.session_state.analysis_results:
-                st.markdown("---")
-                st.markdown("## 📈 Results")
-                
-                # Export button
-                if st.session_state.query_patterns:
-                    col1, col2 = st.columns([6, 2])
-                    with col2:
-                        if st.button("📊 Export PDF Report", use_container_width=True):
-                            try:
-                                pdf_generator = PDFReportGenerator()
-                                pdf_bytes = pdf_generator.generate_report(
-                                    query_patterns=st.session_state.query_patterns,
-                                    suggestions=st.session_state.analysis_results
-                                )
-                                st.download_button(
-                                    label="📥 Download Report",
-                                    data=pdf_bytes,
-                                    file_name=f"querysight_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                                    mime="application/pdf",
-                                    use_container_width=True
-                                )
-                            except Exception as e:
-                                st.error(f"❌ PDF generation error: {str(e)}")
-                
-                # Query pattern analysis
-                if st.session_state.query_patterns:
-                    st.markdown("### 🔍 Query Patterns")
-                    patterns_df = pd.DataFrame(st.session_state.query_patterns)
-                    if not patterns_df.empty:
-                        # Overview metrics
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Patterns", len(patterns_df))
-                        with col2:
-                            st.metric("Total Executions", f"{patterns_df['frequency'].sum():,}")
-                        with col3:
-                            st.metric(
-                                "Avg Duration",
-                                f"{patterns_df['avg_duration_ms'].mean():.2f}ms"
-                            )
-                        
-                        # Detailed analysis tabs
-                        tab1, tab2 = st.tabs(["📊 Pattern Distribution", "⚡ Performance Analysis"])
-                        
-                        with tab1:
-                            # Top patterns by frequency
-                            total_queries = patterns_df['frequency'].sum()
-                            top_patterns = patterns_df.nlargest(10, 'frequency')
-                            top_patterns['percentage'] = (top_patterns['frequency'] / total_queries * 100).round(2)
-                            
-                            st.markdown("#### 📈 Top Query Patterns")
-                            chart_data = top_patterns[['pattern', 'frequency']].set_index('pattern')
-                            st.bar_chart(chart_data)
-                            
-                            st.markdown("#### 📋 Pattern Details")
-                            detail_table = top_patterns[['pattern', 'frequency', 'percentage']]
-                            detail_table.columns = ['Query Pattern', 'Frequency', 'Percentage (%)']
-                            st.dataframe(detail_table, hide_index=True, use_container_width=True)
-                        
-                        with tab2:
-                            # Performance analysis
-                            st.markdown("#### ⏱️ Time-Consuming Queries")
-                            perf_data = patterns_df.nlargest(10, 'avg_duration_ms')
-                            perf_chart = perf_data[['pattern', 'avg_duration_ms']].set_index('pattern')
-                            perf_chart = perf_chart / 1000  # Convert to seconds
-                            perf_chart.columns = ['Average Duration (seconds)']
-                            st.bar_chart(perf_chart)
-                            
-                            st.markdown("#### 📋 Performance Details")
-                            perf_table = patterns_df.nlargest(5, 'avg_duration_ms')[
-                                ['pattern', 'avg_duration_ms', 'frequency', 'avg_read_rows']
-                            ]
-                            perf_table.columns = ['Query Pattern', 'Avg Duration (ms)', 'Frequency', 'Avg Rows Read']
-                            st.dataframe(perf_table, hide_index=True, use_container_width=True)
-                
-                # AI suggestions
-                if st.session_state.analysis_results:
-                    st.markdown("### 🤖 AI Suggestions")
-                    categories = set(sugg['category'] for sugg in st.session_state.analysis_results)
-                    tabs = st.tabs([f"📌 {category}" for category in categories])
+                        # Store in session state
+                        st.session_state.analysis_result = analysis_result
                     
-                    for tab, category in zip(tabs, categories):
-                        with tab:
-                            category_suggestions = [s for s in st.session_state.analysis_results if s['category'] == category]
-                            
-                            for idx, suggestion in enumerate(category_suggestions, 1):
-                                with st.container():
-                                    # Header with impact
-                                    col1, col2 = st.columns([8, 2])
-                                    with col1:
-                                        st.markdown(f"#### {idx}. {suggestion['title']}")
-                                    with col2:
-                                        impact_colors = {
-                                            'HIGH': '🔴',
-                                            'MEDIUM': '🟡',
-                                            'LOW': '🟢'
-                                        }
-                                        st.markdown(f"**Impact:** {impact_colors[suggestion['impact_level']]} {suggestion['impact_level'].title()}")
-                                    
-                                    # Problem description
-                                    if 'problem_description' in suggestion:
-                                        st.markdown(f"**🔍 Issue:**")
-                                        st.markdown(suggestion['problem_description'])
-                                    
-                                    # Optimization details
-                                    if 'optimization_details' in suggestion:
-                                        with st.expander("📊 Details", expanded=False):
-                                            details = suggestion['optimization_details']
-                                            
-                                            if 'benefits' in details:
-                                                st.markdown("**✨ Benefits:**")
-                                                for benefit in details['benefits']:
-                                                    st.markdown(f"✅ {benefit}")
-                                            
-                                            if 'potential_risks' in details:
-                                                st.markdown("**⚠️ Considerations:**")
-                                                for risk in details['potential_risks']:
-                                                    st.markdown(f"- {risk}")
-                                            
-                                            if 'estimated_improvement' in details:
-                                                st.info(f"**📈 Estimated Improvement:** {details['estimated_improvement']}")
-                                    
-                                    # Code comparison
-                                    with st.expander("💻 Code", expanded=False):
-                                        col1, col2 = st.columns(2)
-                                        with col1:
-                                            st.markdown("**Current:**")
-                                            st.code(suggestion['current_pattern'], language='sql')
-                                        with col2:
-                                            st.markdown("**Optimized:**")
-                                            st.code(suggestion['optimized_pattern'], language='sql')
-                                    
-                                    # Implementation steps
-                                    with st.expander("📝 Implementation", expanded=False):
-                                        for step_num, step in enumerate(suggestion['implementation_steps'], 1):
-                                            st.markdown(f"{step_num}. {step}")
-                                        
-                                        if suggestion.get('code_example'):
-                                            st.markdown("**Complete Example:**")
-                                            st.code(suggestion['code_example'], language='sql')
-                                    
-                                    st.divider()
-
+                    # Render analysis dashboard
+                    render_analysis_dashboard(st.session_state.analysis_result)
+            
+        with tab_recommendations:
+            if not hasattr(st.session_state, 'analysis_result'):
+                st.warning("⚠️ Please run the analysis first")
+                return
+                
+            if suggest_button or 'recommendations' in st.session_state:
+                with st.spinner("Generating AI recommendations..."):
+                    if suggest_button or st.session_state.recommendations is None:
+                        # Generate suggestions
+                        ai_suggester = AISuggester(config['openai_api_key'])
+                        recommendations = ai_suggester.generate_suggestions(
+                            st.session_state.analysis_result
+                        )
+                        st.session_state.recommendations = recommendations
+                    
+                    # Render recommendations
+                    render_recommendations(st.session_state.recommendations)
+                    
     except Exception as e:
-        st.error(f"❌ Application error: {str(e)}")
-        logger.error(f"Application error: {traceback.format_exc()}")
+        st.error(f"An error occurred: {str(e)}")
+        st.error(traceback.format_exc())
 
 if __name__ == "__main__":
     main()

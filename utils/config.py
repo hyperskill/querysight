@@ -1,8 +1,12 @@
 import os
 from dotenv import load_dotenv
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
+logger.info("Loading environment variables")
 load_dotenv()
 
 class Config:
@@ -18,6 +22,7 @@ class Config:
     
     # DBT configuration
     DBT_PROJECT_PATH: str = os.getenv('DBT_PROJECT_PATH', '')
+    logger.info(f"Loaded DBT_PROJECT_PATH: {DBT_PROJECT_PATH}")
 
     @classmethod
     def validate_config(cls) -> tuple[bool, list[str]]:
@@ -32,6 +37,10 @@ class Config:
             'OPENAI_API_KEY': cls.OPENAI_API_KEY,
             'DBT_PROJECT_PATH': cls.DBT_PROJECT_PATH
         }
+        
+        logger.info("Validating config variables:")
+        for var, value in required_vars.items():
+            logger.info(f"  {var}: {'[EMPTY]' if not value or value.strip() == '' else '[SET]'}")
         
         missing_vars = [var for var, value in required_vars.items() 
                        if not value or value.strip() == '']

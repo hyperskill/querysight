@@ -1,4 +1,5 @@
 import time
+import hashlib
 try:
     from clickhouse_driver import Client
 except ImportError:
@@ -13,6 +14,7 @@ except ImportError:
 from typing import List, Dict, Any, Optional, Tuple, Union
 import re
 from .cache_manager import QueryLogsCacheManager
+from .models import QueryLog, QueryPattern, QueryType, QueryFocus
 import logging
 
 logger = logging.getLogger(__name__)
@@ -49,8 +51,8 @@ class ClickHouseDataAcquisition:
         sample_size: float = 0.1,
         user_include: Optional[List[str]] = None,
         user_exclude: Optional[List[str]] = None,
-        query_focus: Optional[List[str]] = None,
-        query_types: Optional[List[str]] = None
+        query_focus: Optional[List[QueryFocus]] = None,
+        query_types: Optional[List[QueryType]] = None
     ) -> Dict[str, Any]:
         """
         Retrieve query logs from ClickHouse system.query_log table with advanced filtering
@@ -123,6 +125,19 @@ class ClickHouseDataAcquisition:
                 'min_frequency': 10    # Default for frequent queries
             }
             
+            # First check if we have any queries at all in this time range
+            base_count_query = """
+                SELECT count(*)
+                FROM system.query_log
+                WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
+                AND type = 'QueryStart'
+            """
+            try:
+                base_count = self.client.execute(base_count_query, params)[0][0]
+                logger.info(f"Found {base_count} total queries in time range")
+            except Exception as e:
+                logger.error(f"Failed to get base query count: {str(e)}")
+            
             logger.debug(f"Initial params: {params}")
             
             # Add user filters
@@ -145,28 +160,52 @@ class ClickHouseDataAcquisition:
                 type_conditions = []
                 for i, qtype in enumerate(query_types):
                     param_name = f'query_type_{i}'
+                    # Extract the actual SQL command type (SELECT, INSERT, etc.)
+                    sql_type = qtype.value if hasattr(qtype, 'value') else str(qtype)
                     type_conditions.append(f"query ILIKE %(query_type_{i})s")
-                    params[param_name] = f'%%{qtype}%%'
+                    params[param_name] = f'%%{sql_type}%%'
+                    logger.debug(f"Adding query type filter: {sql_type}")
                 where_clauses.append(f"({' OR '.join(type_conditions)})")
-                logger.debug(f"Added query type filters: {params}")
+                logger.debug(f"Added query type filters: {type_conditions}")
                 
             # Add performance filters
             if query_focus and 'All Queries' not in query_focus:
                 if 'Slow Queries' in query_focus:
                     where_clauses.append("query_duration_ms > %(min_duration)s")
-                    params['min_duration'] = 1000  # Override default for slow queries
-                if 'Frequent Queries' in query_focus:
-                    # This requires a subquery to count query occurrences
-                    where_clauses.append("""
-                        normalized_query_hash IN (
-                            SELECT normalized_query_hash 
+                    params['min_duration'] = 100  # Lower threshold for testing (100ms instead of 1000ms)
+                    
+                    # Log the slow query count
+                    try:
+                        count_query = f"""
+                            SELECT count(*) 
                             FROM system.query_log 
                             WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
-                            GROUP BY normalized_query_hash 
-                            HAVING count() > %(min_frequency)s
-                        )
-                    """)
-                    params['min_frequency'] = 10  # Override default for frequent queries
+                            AND query_duration_ms > %(min_duration)s
+                        """
+                        slow_count = self.client.execute(count_query, params)[0][0]
+                        logger.info(f"Found {slow_count} queries slower than {params['min_duration']}ms")
+                    except Exception as e:
+                        logger.error(f"Failed to count slow queries: {str(e)}")
+                        
+                if 'Frequent Queries' in query_focus:
+                    # This requires a subquery to count query occurrences
+                    frequency_subquery = """
+                        SELECT normalized_query_hash 
+                        FROM system.query_log 
+                        WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
+                        GROUP BY normalized_query_hash 
+                        HAVING count() > %(min_frequency)s
+                    """
+                    where_clauses.append(f"normalized_query_hash IN ({frequency_subquery})")
+                    params['min_frequency'] = 3  # Lower threshold for testing
+                    
+                    # Log the subquery results
+                    try:
+                        count_query = f"SELECT count(*) FROM ({frequency_subquery})"
+                        subquery_count = self.client.execute(count_query, params)[0][0]
+                        logger.info(f"Found {subquery_count} query patterns with frequency > {params['min_frequency']}")
+                    except Exception as e:
+                        logger.error(f"Failed to count frequent queries: {str(e)}")
                 logger.debug(f"Added performance filters: {params}")
             
             # Apply sampling at the application level instead of using SAMPLE clause
@@ -195,6 +234,10 @@ class ClickHouseDataAcquisition:
             OFFSET %(offset)s
             """
             
+            logger.info("Executing query with params:")
+            logger.info(f"Query: {query}")
+            logger.info(f"Params: {params}")
+            
             try:
                 offset = 0
                 all_rows = []
@@ -204,10 +247,12 @@ class ClickHouseDataAcquisition:
                     WHERE {' AND '.join(where_clauses)}
                 """
                 
+                logger.info(f"Count query: {total_count_query}")
+                
                 # Get total count first
                 try:
                     total_count = self.client.execute(total_count_query, params)[0][0]
-                    logger.debug(f"Total count: {total_count}")
+                    logger.info(f"Total count: {total_count}")
                     
                     # If no rows found, return early
                     if total_count == 0:
@@ -304,20 +349,20 @@ class ClickHouseDataAcquisition:
                         rows, columns = result
                         batch_rows = []
                         for row in rows:
-                            processed_row = {
-                                'query_id': row[0],
-                                'query': row[1],
-                                'type': str(row[2]),
-                                'user': row[3],
-                                'query_start_time': row[4],
-                                'query_duration_ms': float(row[5]),
-                                'read_rows': int(row[6]),
-                                'read_bytes': int(row[7]),
-                                'result_rows': int(row[8]),
-                                'result_bytes': int(row[9]),
-                                'memory_usage': int(row[10]),
-                                'normalized_query_hash': row[11]
-                            }
+                            processed_row = QueryLog(
+                                query_id=row[0],
+                                query=row[1],
+                                type=str(row[2]),
+                                user=row[3],
+                                query_start_time=row[4],
+                                query_duration_ms=float(row[5]),
+                                read_rows=int(row[6]),
+                                read_bytes=int(row[7]),
+                                result_rows=int(row[8]),
+                                result_bytes=int(row[9]),
+                                memory_usage=int(row[10]),
+                                normalized_query_hash=row[11]
+                            )
                             batch_rows.append(processed_row)
                         
                         # Apply sampling at application level
@@ -332,7 +377,7 @@ class ClickHouseDataAcquisition:
                         if len(batch_rows) > 0:
                             try:
                                 # Update cache with the current batch
-                                batch_df = pd.DataFrame(batch_rows)
+                                batch_df = pd.DataFrame([log.to_dict() for log in batch_rows])
                                 self.cache_manager.update_cache(batch_df, start_date, end_date)
                                 logger.info(f"Successfully cached batch with {len(batch_rows)} rows")
                             except Exception as cache_error:
@@ -343,7 +388,7 @@ class ClickHouseDataAcquisition:
                         if len(all_rows) >= batch_size or offset >= total_count:
                             return {
                                 'status': 'in_progress' if offset < total_count else 'completed',
-                                'data': all_rows,
+                                'data': [log.to_dict() for log in all_rows],
                                 'total_rows': total_count,
                                 'loaded_rows': len(all_rows)
                             }
@@ -375,13 +420,28 @@ class ClickHouseDataAcquisition:
                 'loaded_rows': 0
             }
 
-    def analyze_query_patterns(self, query_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def test_connection(self) -> None:
+        """Test the connection to ClickHouse"""
+        try:
+            self.client.execute("SELECT 1")
+        except Exception as e:
+            raise Exception(f"Failed to connect to ClickHouse: {str(e)}")
+
+    def analyze_query_patterns(
+        self,
+        query_logs: List[QueryLog],
+        min_frequency: int = 5
+    ) -> List[QueryPattern]:
         """
         Analyze query patterns from the logs
-        """
-        patterns = {}
         
-        def normalize_query(query: str) -> str:
+        Args:
+            query_logs: List of query logs to analyze
+            min_frequency: Minimum frequency threshold for patterns
+        """
+        patterns: Dict[str, QueryPattern] = {}
+        
+        def normalize_query(query: str) -> tuple[str, str]:
             # Remove literals
             query = re.sub(r"'[^']*'", "'?'", query)
             query = re.sub(r"\d+", "?", query)
@@ -393,36 +453,17 @@ class ClickHouseDataAcquisition:
             return query, model_name
 
         for log in query_logs:
-            query = log['query']
-            normalized_query, model_name = normalize_query(query)
+            normalized_query, model_name = normalize_query(log.query)
+            pattern_id = hashlib.md5(normalized_query.encode()).hexdigest()
             
-            if normalized_query in patterns:
-                patterns[normalized_query]['frequency'] += 1
-                patterns[normalized_query]['total_duration'] += log['query_duration_ms']
-                if log['query_duration_ms'] > patterns[normalized_query]['max_duration']:
-                    patterns[normalized_query]['max_duration'] = log['query_duration_ms']
-                patterns[normalized_query]['total_read_rows'] += log['read_rows']
-                patterns[normalized_query]['total_read_bytes'] += log['read_bytes']
-            else:
-                patterns[normalized_query] = {
-                    'pattern': normalized_query,
-                    'model_name': model_name,
-                    'frequency': 1,
-                    'total_duration': log['query_duration_ms'],
-                    'max_duration': log['query_duration_ms'],
-                    'total_read_rows': log['read_rows'],
-                    'total_read_bytes': log['read_bytes']
-                }
-
-        # Convert to list and calculate averages
-        result = []
-        for pattern in patterns.values():
-            pattern['avg_duration'] = pattern['total_duration'] / pattern['frequency'] / 1000  # Convert to seconds
-            pattern['max_duration'] = pattern['max_duration'] / 1000  # Convert to seconds
-            pattern['avg_read_rows'] = pattern['total_read_rows'] / pattern['frequency']
-            pattern['avg_read_bytes'] = pattern['total_read_bytes'] / pattern['frequency']
-            result.append(pattern)
-        
-        # Sort by frequency and duration
-        result.sort(key=lambda x: (-x['frequency'], -x['avg_duration']))
-        return result
+            if pattern_id not in patterns:
+                patterns[pattern_id] = QueryPattern(
+                    pattern_id=pattern_id,
+                    sql_pattern=normalized_query,
+                    model_name=model_name
+                )
+            
+            patterns[pattern_id].update_from_log(log)
+            
+        # Filter patterns by frequency
+        return [p for p in patterns.values() if p.frequency >= min_frequency]

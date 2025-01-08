@@ -118,6 +118,8 @@ multidict==6.1.0
     #   yarl
 narwhals==1.18.4
     # via altair
+networkx==3.2.1
+    # via querysight-cli
 numpy==2.2.0
     # via
     #   pandas
@@ -168,7 +170,7 @@ python-dateutil==2.9.0.post0
     #   htmldate
     #   pandas
 python-dotenv==1.0.1
-    # via querysight (pyproject.toml)
+    # via querysight-cli
 pytz==2024.2
     # via
     #   clickhouse-driver
@@ -188,8 +190,8 @@ requests==2.32.3
     # via
     #   streamlit
     #   twilio
-rich==13.9.4
-    # via streamlit
+rich==13.7.0
+    # via querysight-cli
 rpds-py==0.22.3
     # via
     #   jsonschema
