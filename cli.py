@@ -127,6 +127,7 @@ def cli():
 @click.option('--exclude-users', help='Comma-separated list of users to exclude')
 @click.option('--query-types', help='Comma-separated list of query types (SELECT,INSERT,CREATE,ALTER,DROP)')
 @click.option('--cache/--no-cache', default=True, help='Use cached results if available')
+@click.option('--level', help='Depth of performed analysis', default="query_stats" )
 def analyze(
     days: int,
     focus: str,

@@ -1,22 +1,41 @@
+import sqlite3
 from datetime import datetime, timedelta
-import pandas as pd
-from typing import Optional, Dict, Any, List
-import json
-import os
-from pathlib import Path
+from typing import Optional, List, Dict, Any
 from .models import QueryLog, QueryPattern, AnalysisResult
 
 class QueryLogsCacheManager:
-    def __init__(self, cache_dir: str = '.cache'):
-        try:
-            self.cache_dir = Path(cache_dir)
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            self.cache_enabled = True
-        except (OSError, PermissionError):
-            # If we can't create/access cache directory, disable caching
-            self.cache_enabled = False
+    def __init__(self, db_path: str = 'cache.db'):
+        self.db_path = db_path
+        self.cache_enabled = True
         self.cache_duration = timedelta(hours=24)
         
+        # Initialize the database
+        self._initialize_db()
+        
+    def _initialize_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Create tables if they do not exist
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS query_logs (
+                id INTEGER PRIMARY KEY,
+                query TEXT,
+                execution_time REAL,
+                execution_time_category TEXT,
+                query_length INTEGER,
+                start_date TEXT,
+                end_date TEXT
+            )
+            ''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS analysis_results (
+                cache_key TEXT PRIMARY KEY,
+                result TEXT,
+                timestamp TEXT
+            )
+            ''')
+            conn.commit()
+
     def get_cached_data(
         self,
         start_date: datetime,
@@ -28,20 +47,19 @@ class QueryLogsCacheManager:
         if not self.cache_enabled:
             return None
             
-        cache_file = self._get_cache_file(start_date, end_date)
-        if not cache_file.exists():
-            return None
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT * FROM query_logs
+            WHERE start_date >= ? AND end_date <= ?
+            ''', (start_date.isoformat(), end_date.isoformat()))
+            rows = cursor.fetchall()
             
-        # Check if cache is expired
-        if self._is_cache_expired(cache_file):
-            return None
+            if not rows:
+                return None
             
-        try:
-            df = pd.read_parquet(cache_file)
-            return [QueryLog.from_dict(row) for row in df.to_dict('records')]
-        except Exception as e:
-            return None
-            
+            return [QueryLog.from_dict(dict(row)) for row in rows]
+
     def update_cache(
         self,
         logs: List[QueryLog],
@@ -54,21 +72,14 @@ class QueryLogsCacheManager:
         if not self.cache_enabled:
             return
             
-        try:
-            cache_file = self._get_cache_file(start_date, end_date)
-            
-            # Convert logs to DataFrame
-            df = pd.DataFrame([log.__dict__ for log in logs])
-            
-            # Save to parquet with compression
-            df.to_parquet(
-                cache_file,
-                compression='snappy',
-                index=False
-            )
-        except:
-            # If caching fails, just continue without it
-            pass
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for log in logs:
+                cursor.execute('''
+                INSERT INTO query_logs (query, execution_time, execution_time_category, query_length, start_date, end_date)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''', (log.query, log.execution_time, log.execution_time_category, log.query_length, start_date.isoformat(), end_date.isoformat()))
+            conn.commit()
         
     def cache_analysis_result(
         self,
@@ -81,10 +92,8 @@ class QueryLogsCacheManager:
         if not self.cache_enabled:
             return
             
-        try:
-            cache_file = self.cache_dir / f"analysis_{cache_key}.json"
-            
-            # Convert to serializable format
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
             serialized = {
                 "timestamp": result.timestamp.isoformat(),
                 "query_patterns": [
@@ -106,12 +115,12 @@ class QueryLogsCacheManager:
                 "uncovered_tables": list(result.uncovered_tables)
             }
             
-            with open(cache_file, 'w') as f:
-                json.dump(serialized, f, indent=2)
-        except:
-            # If caching fails, just continue without it
-            pass
-            
+            cursor.execute('''
+            INSERT OR REPLACE INTO analysis_results (cache_key, result, timestamp)
+            VALUES (?, ?, ?)
+            ''', (cache_key, json.dumps(serialized), result.timestamp.isoformat()))
+            conn.commit()
+
     def get_cached_analysis(
         self,
         cache_key: str,
@@ -123,20 +132,22 @@ class QueryLogsCacheManager:
         if not self.cache_enabled:
             return None
             
-        cache_file = self.cache_dir / f"analysis_{cache_key}.json"
-        
-        if not cache_file.exists():
-            return None
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT result, timestamp FROM analysis_results
+            WHERE cache_key = ?
+            ''', (cache_key,))
+            row = cursor.fetchone()
             
-        # Check if cache is expired
-        if self._is_cache_expired(cache_file, max_age):
-            return None
+            if not row:
+                return None
             
-        try:
-            with open(cache_file, 'r') as f:
-                data = json.load(f)
-                
-            # Reconstruct AnalysisResult
+            result_data, timestamp = row
+            if datetime.fromisoformat(timestamp) < datetime.now() - max_age:
+                return None
+            
+            data = json.loads(result_data)
             patterns = [
                 QueryPattern(
                     pattern_id=p['pattern_id'],
@@ -160,9 +171,6 @@ class QueryLogsCacheManager:
                 uncovered_tables=set(data['uncovered_tables']),
                 model_coverage=data['model_coverage']
             )
-            
-        except Exception as e:
-            return None
     
     def has_valid_cache(
         self,
@@ -174,107 +182,30 @@ class QueryLogsCacheManager:
         if not self.cache_enabled:
             return False
             
-        cache_file = self._get_cache_file(start_date, end_date)
-        if not cache_file.exists():
-            return False
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT COUNT(*) FROM query_logs
+            WHERE start_date >= ? AND end_date <= ?
+            ''', (start_date.isoformat(), end_date.isoformat()))
+            count = cursor.fetchone()[0]
             
-        # Check if cache is expired
-        if self._is_cache_expired(cache_file):
-            return False
-            
-        # Check if query focus matches
-        try:
-            with open(cache_file.with_suffix('.meta'), 'r') as f:
-                meta = json.load(f)
-                return meta.get('query_focus') == query_focus
-        except:
-            return False
+            return count > 0
 
     def get_cached_logs(self) -> Dict[str, Any]:
         """Get cached logs with metadata"""
         if not self.cache_enabled:
             return {'status': 'error', 'error': 'Cache is disabled'}
             
-        # Find the most recent cache file
-        try:
-            cache_files = list(self.cache_dir.glob('*.parquet'))
-            if not cache_files:
-                return {'status': 'error', 'error': 'No cache found'}
-                
-            latest_cache = max(cache_files, key=lambda x: x.stat().st_mtime)
-            
-            df = pd.read_parquet(latest_cache)
-            logs = [QueryLog.from_dict(row) for row in df.to_dict('records')]
-            return {
-                'status': 'success',
-                'data': logs
-            }
-        except Exception as e:
-            return {
-                'status': 'error',
-                'error': str(e)
-            }
-
-    def get_latest_result(self) -> Optional[AnalysisResult]:
-        """Get the latest analysis result from cache"""
-        if not self.cache_enabled:
-            return None
-            
-        result_file = self.cache_dir / 'latest_result.json'
-        if not result_file.exists():
-            return None
-            
-        try:
-            with open(result_file, 'r') as f:
-                data = json.load(f)
-                return AnalysisResult.from_dict(data)
-        except:
-            return None
-
-    def cache_logs(
-        self,
-        logs: List[QueryLog],
-        start_date: datetime,
-        end_date: datetime,
-        query_focus: str
-    ) -> None:
-        """Cache query logs with metadata"""
-        if not self.cache_enabled:
-            return
-            
-        try:
-            cache_file = self._get_cache_file(start_date, end_date)
-            
-            # Save logs
-            df = pd.DataFrame([log.__dict__ for log in logs])
-            df.to_parquet(cache_file, compression='snappy')
-            
-            # Save metadata
-            meta = {
-                'query_focus': query_focus,
-                'cached_at': datetime.now().isoformat(),
-                'start_date': start_date.isoformat(),
-                'end_date': end_date.isoformat()
-            }
-            with open(cache_file.with_suffix('.meta'), 'w') as f:
-                json.dump(meta, f)
-        except:
-            # If caching fails, just continue without it
-            pass
-
-    def _get_cache_file(self, start_date: datetime, end_date: datetime) -> Path:
-        """Generate cache file path based on date range"""
-        cache_key = f"{start_date.date()}_{end_date.date()}"
-        return self.cache_dir / f"query_logs_{cache_key}.parquet"
-        
-    def _is_cache_expired(
-        self,
-        cache_file: Path,
-        max_age: timedelta = None
-    ) -> bool:
-        """Check if cache file is expired"""
-        if max_age is None:
-            max_age = self.cache_duration
-            
-        cache_time = datetime.fromtimestamp(cache_file.stat().st_mtime)
-        return datetime.now() - cache_time > max_age
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT * FROM query_logs
+            ORDER BY start_date DESC
+            LIMIT 1
+            ''')
+            log = cursor.fetchone()
+            if log:
+                return {'status': 'success', 'data': log}
+            else:
+                return {'status': 'error', 'error': 'No cached logs found'}
