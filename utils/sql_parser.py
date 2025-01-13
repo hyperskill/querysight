@@ -23,17 +23,33 @@ class SQLTableExtractor:
         parts = clean.split('.')
         return parts[-1].strip().lower()
     
-    def _extract_from_token(self, token: Token) -> Optional[str]:
-        """Extract table name from a token, handling quoted and qualified names."""
+    def _extract_from_token(self, token: Token) -> List[str]:
+        """Extract table name variations from a token, handling quoted and qualified names."""
         if not token:
-            return None
+            return []
             
         # Handle quoted identifiers
         value = token.value.strip('`"\' ')
         # Split on dots for qualified names
         parts = [p.strip('`"\' ') for p in value.split('.')]
-        # Return the last part (table name)
-        return parts[-1].lower() if parts else None
+        
+        if not parts:
+            return []
+        
+        # Generate all possible variations
+        variations = []
+        # Just table name
+        variations.append(parts[-1].lower())
+        
+        if len(parts) >= 2:
+            # schema.table
+            variations.append(f"{parts[-2]}.{parts[-1]}".lower())
+        
+        if len(parts) >= 3:
+            # database.schema.table
+            variations.append(f"{parts[-3]}.{parts[-2]}.{parts[-1]}".lower())
+            
+        return variations
     
     def _process_identifier(self, identifier: Identifier) -> None:
         """Process an SQL identifier token to extract table references."""
@@ -49,19 +65,28 @@ class SQLTableExtractor:
                 break
         
         if name_token:
-            table_name = self._extract_from_token(name_token)
-            if table_name:
-                self.table_refs.add(table_name)
+            table_variations = self._extract_from_token(name_token)
+            self.table_refs.update(table_variations)
     
     def _process_function(self, func: Function) -> None:
-        """Process function calls, specifically for dbt ref() functions."""
-        if func.tokens[0].value.lower() == 'ref':
-            # Extract model name from ref('model_name')
+        """Process function calls, specifically for dbt ref() and source() functions."""
+        if not func.tokens:
+            return
+            
+        func_name = func.tokens[0].value.lower()
+        if func_name in ('ref', 'source'):
+            # Extract arguments from ref('model_name') or source('source_name', 'table_name')
+            args = []
             for token in func.tokens:
                 if token.ttype == Name:
-                    model_name = self._clean_identifier(token.value)
-                    if model_name:
-                        self.table_refs.add(model_name)
+                    args.append(self._clean_identifier(token.value))
+                    
+            if func_name == 'ref' and len(args) >= 1:
+                # ref('model_name')
+                self.table_refs.add(args[0])
+            elif func_name == 'source' and len(args) >= 2:
+                # source('source_name', 'table_name')
+                self.table_refs.add(f"{args[0]}.{args[1]}")
     
     def _extract_cte_names(self, statement: TokenList) -> None:
         """Extract CTE (Common Table Expression) names to avoid treating them as table refs."""
@@ -74,9 +99,13 @@ class SQLTableExtractor:
                 
             if with_seen and isinstance(token, Identifier):
                 # Add CTE name to our set
-                cte_name = self._extract_from_token(token)
+                cte_name = self._clean_identifier(token.value)
                 if cte_name:
-                    self.current_cte_names.add(cte_name.lower())
+                    self.current_cte_names.add(cte_name)
+                    
+            # Stop looking after we find the first non-CTE token
+            if with_seen and token.ttype is Keyword and token.value.upper() != 'WITH':
+                break
     
     def _process_token_list(self, token_list: TokenList) -> None:
         """Recursively process a token list to find table references."""

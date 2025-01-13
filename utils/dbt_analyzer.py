@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 import json
 from .models import DBTModel, AnalysisResult
+from .dbt_mapper import DBTModelMapper, DBTModelInfo
 import logging
 logger = logging.getLogger(__name__)
 
@@ -17,66 +18,100 @@ class DBTProjectAnalyzer:
         logger.info(f"Initializing DBTProjectAnalyzer with path: {project_path}")
         self.models_path = os.path.join(project_path, 'models')
         self.target_path = os.path.join(project_path, 'target')
+        self.mapper = DBTModelMapper(project_path)
         self.models: Dict[str, DBTModel] = {}
-        self.table_to_model: Dict[str, str] = {}  # Maps physical table names to model names
         
     def analyze_project(self) -> AnalysisResult:
         """Analyze the dbt project structure and return relevant information"""
+        logger.info("Starting dbt project analysis")
+        
         try:
+            # Validate project path
             if not self.project_path or not os.path.exists(self.project_path):
-                return AnalysisResult(
-                    timestamp=datetime.now(),
-                    query_patterns=[],
-                    dbt_models={},
-                    uncovered_tables=set(),
-                    model_coverage={}
+                logger.warning(f"Invalid dbt project path: {self.project_path}")
+                return self._create_empty_result()
+                
+            # Load models using the mapper
+            self.mapper.load_models()
+            
+            # Convert mapper's model info to our model format
+            for name, info in self.mapper.model_info.items():
+                self.models[name] = DBTModel(
+                    name=name,
+                    path=info.path,
+                    materialization=info.materialized
                 )
             
-            # Load project configuration
-            project_config = self._read_project_config()
-            default_schema = project_config.get('models', {}).get('schema', 'public')
-            default_database = project_config.get('models', {}).get('database', 'default')
-            
-            # Load manifest if available
-            manifest = self._load_manifest()
-            if manifest:
-                self._load_from_manifest(manifest, default_schema, default_database)
-            else:
-                # Fallback to file-based analysis
-                self._analyze_models()
-            
-            # Analyze model dependencies
+            # Analyze dependencies
             self._analyze_dependencies()
             
-            return AnalysisResult(
+            # Create analysis result
+            result = AnalysisResult(
                 timestamp=datetime.now(),
-                query_patterns=[],  # To be filled by data acquisition
+                query_patterns=[],  # Will be populated later
                 dbt_models=self.models,
+                dbt_mapper=self.mapper,
                 uncovered_tables=set(),
-                model_coverage={}
+                model_coverage={
+                    "covered": 0.0,
+                    "uncovered": 0.0,
+                    "total_models": len(self.models),
+                    "used_models": [],
+                    "unused_models": list(self.models.keys())
+                }
             )
             
+            logger.info(f"Project analysis complete. Found {len(self.models)} models")
+            return result
+            
         except Exception as e:
-            logger.warning(f"Failed to analyze dbt project: {str(e)}")
-            return AnalysisResult(
-                timestamp=datetime.now(),
-                query_patterns=[],
-                dbt_models={},
-                uncovered_tables=set(),
-                model_coverage={}
-            )
+            logger.error(f"Failed to analyze dbt project: {str(e)}", exc_info=True)
+            return self._create_empty_result()
+    
+    def _create_empty_result(self) -> AnalysisResult:
+        """Create an empty analysis result with proper structure"""
+        return AnalysisResult(
+            timestamp=datetime.now(),
+            query_patterns=[],
+            dbt_models={},
+            dbt_mapper=self.mapper,  # Keep mapper for potential retries
+            uncovered_tables=set(),
+            model_coverage={
+                "covered": 0.0,
+                "uncovered": 0.0,
+                "total_models": 0,
+                "used_models": [],
+                "unused_models": []
+            }
+        )
+    
+    def get_model_name(self, table_name: str) -> Optional[str]:
+        """Get the dbt model name for a table name. Required by AnalysisResult."""
+        return self.mapper.get_model_name(table_name)
     
     def get_model_for_table(self, table_name: str) -> Optional[str]:
         """Get the dbt model name for a physical table"""
+        # Clean table name
+        table_name = table_name.lower().strip()
+        
         # Try exact match first
         if table_name in self.table_to_model:
             return self.table_to_model[table_name]
-            
-        # Try schema.table format
+        
+        # Try without schema prefix
         if '.' in table_name:
             base_name = table_name.split('.')[-1]
             if base_name in self.table_to_model:
                 return self.table_to_model[base_name]
+        
+        # Try matching model name directly
+        if table_name in self.models:
+            return table_name
+        
+        # Try matching physical name
+        for model_name, model in self.models.items():
+            if model.physical_name.lower() == table_name:
+                return model_name
         
         return None
     
@@ -165,26 +200,34 @@ class DBTProjectAnalyzer:
             self._extract_columns(model_name, content)
     
     def _analyze_dependencies(self) -> None:
-        """
-        Analyze dependencies between models
-        """
+        """Analyze dependencies between models"""
         for model_name, model in self.models.items():
-            with open(os.path.join(self.models_path, model.path), 'r') as f:
-                content = f.read()
-            
-            # Find references using ref() macro
-            refs = re.finditer(r'{{\s*ref\([\'"]([^\'"]+)[\'"]\)\s*}}', content)
-            for ref in refs:
-                referenced_model = ref.group(1)
-                if referenced_model in self.models:
-                    model.add_dependency(referenced_model)
-                    self.models[referenced_model].add_reference(model_name)
-            
-            # Find source references
-            sources = re.finditer(r'{{\s*source\([\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\)\s*}}', content)
-            for source in sources:
-                source_name = f"{source.group(1)}.{source.group(2)}"
-                model.add_dependency(source_name)
+            model_info = self.mapper.get_model_info(model_name)
+            if not model_info:
+                continue
+                
+            # Read the model file
+            model_path = os.path.join(self.models_path, model_info.path)
+            try:
+                with open(model_path, 'r') as f:
+                    content = f.read()
+                
+                # Find references using ref() macro
+                refs = re.finditer(r'{{\s*ref\([\'"]([^\'"]+)[\'"]\)\s*}}', content)
+                for ref in refs:
+                    referenced_model = ref.group(1)
+                    if referenced_model in self.models:
+                        model.add_dependency(referenced_model)
+                        self.models[referenced_model].add_reference(model_name)
+                
+                # Find source references
+                sources = re.finditer(r'{{\s*source\([\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\)\s*}}', content)
+                for source in sources:
+                    source_name = f"{source.group(1)}.{source.group(2)}"
+                    model.add_dependency(source_name)
+                    
+            except Exception as e:
+                logger.error(f"Error analyzing dependencies for {model_name}: {str(e)}")
     
     def _extract_columns(self, model_name: str, content: str) -> None:
         """

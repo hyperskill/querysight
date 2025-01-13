@@ -6,11 +6,7 @@ except ImportError:
     raise ImportError("clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'")
 
 from datetime import datetime, timedelta
-try:
-    import pandas as pd
-except ImportError:
-    raise ImportError("pandas is required. Please install it using 'pip install pandas'")
-
+import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple, Union
 import re
 from .cache_manager import QueryLogsCacheManager
@@ -112,7 +108,6 @@ class ClickHouseDataAcquisition:
                     cityHash64(normalizeQuery(query)) as normalized_query_hash
                 FROM system.query_log
                 WHERE {where_clause}
-                {"SAMPLE " + str(sample_size) if sample_size < 1 else ""}
                 ORDER BY event_time DESC
             """
             

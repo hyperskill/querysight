@@ -34,27 +34,135 @@ class QueryLogsCacheManager:
     def _init_db(self):
         """Initialize SQLite database with required tables"""
         with sqlite3.connect(self.db_path) as conn:
-            # Query Logs Table - Direct mapping of QueryLog class
-            conn.execute("""
+            cursor = conn.cursor()
+            
+            # Cache metadata table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cache_metadata (
+                    cache_key TEXT PRIMARY KEY,
+                    data_type TEXT,
+                    timestamp TEXT,
+                    expiry TEXT,
+                    level INTEGER
+                )
+            """)
+            
+            # Query logs table
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS query_logs (
                     query_id TEXT PRIMARY KEY,
-                    query TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    user TEXT NOT NULL,
-                    query_start_time TIMESTAMP NOT NULL,
-                    query_duration_ms REAL NOT NULL,
-                    read_rows INTEGER NOT NULL,
-                    read_bytes INTEGER NOT NULL,
-                    result_rows INTEGER NOT NULL,
-                    result_bytes INTEGER NOT NULL,
-                    memory_usage INTEGER NOT NULL,
-                    normalized_query_hash TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    query TEXT,
+                    type TEXT,
+                    user TEXT,
+                    query_start_time TEXT,
+                    query_duration_ms REAL,
+                    read_rows INTEGER,
+                    read_bytes INTEGER,
+                    result_rows INTEGER,
+                    result_bytes INTEGER,
+                    memory_usage INTEGER,
+                    normalized_query_hash TEXT,
+                    cache_key TEXT,
+                    timestamp REAL
+                )
+            """)
+            
+            # Create index on query_start_time for efficient filtering
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_start_time ON query_logs(query_start_time)")
+            
+            # Drop and recreate patterns table with new schema
+            cursor.execute("DROP TABLE IF EXISTS patterns")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS patterns (
+                    pattern_id TEXT PRIMARY KEY,
+                    sql_pattern TEXT,
+                    frequency INTEGER,
+                    total_duration_ms INTEGER,
+                    users TEXT,
+                    tables_accessed TEXT,
+                    first_seen REAL,
+                    last_seen REAL,
+                    cache_key TEXT,
+                    timestamp REAL
+                )
+            """)
+            
+            # Drop and recreate analysis_results table with new schema
+            cursor.execute("DROP TABLE IF EXISTS analysis_results")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS analysis_results (
+                    result_id TEXT PRIMARY KEY,
+                    timestamp TEXT,
+                    query_patterns TEXT,
+                    dbt_models TEXT,
+                    uncovered_tables TEXT,
+                    model_coverage TEXT,
+                    cache_key TEXT
+                )
+            """)
+            
+            # DBT Models table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS dbt_models (
+                    name TEXT PRIMARY KEY,
+                    path TEXT,
+                    materialization TEXT,
+                    freshness_hours INTEGER
+                )
+            """)
+            
+            # Model columns table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_columns (
+                    model_name TEXT,
+                    column_name TEXT,
+                    column_type TEXT,
+                    PRIMARY KEY (model_name, column_name),
+                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
+                )
+            """)
+            
+            # Model tests table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_tests (
+                    model_name TEXT,
+                    test_name TEXT,
+                    PRIMARY KEY (model_name, test_name),
+                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
+                )
+            """)
+            
+            # Model dependencies table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_dependencies (
+                    model_name TEXT,
+                    depends_on TEXT,
+                    PRIMARY KEY (model_name, depends_on),
+                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
+                )
+            """)
+            
+            # Model references table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_references (
+                    model_name TEXT,
+                    referenced_by TEXT,
+                    PRIMARY KEY (model_name, referenced_by),
+                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
+                )
+            """)
+            
+            # Legacy cache table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS analysis_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    data TEXT,
+                    timestamp REAL
                 )
             """)
             
             # Query Patterns Table - Direct mapping of QueryPattern class
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS query_patterns (
                     pattern_id TEXT PRIMARY KEY,
                     sql_pattern TEXT NOT NULL,
@@ -69,7 +177,7 @@ class QueryLogsCacheManager:
             """)
             
             # Pattern Users - Many-to-many relationship
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pattern_users (
                     pattern_id TEXT,
                     user TEXT,
@@ -79,7 +187,7 @@ class QueryLogsCacheManager:
             """)
             
             # Pattern Tables - Many-to-many relationship
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pattern_tables (
                     pattern_id TEXT,
                     table_name TEXT,
@@ -89,7 +197,7 @@ class QueryLogsCacheManager:
             """)
             
             # Pattern DBT Models - Many-to-many relationship
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pattern_dbt_models (
                     pattern_id TEXT,
                     model_name TEXT,
@@ -98,35 +206,14 @@ class QueryLogsCacheManager:
                 )
             """)
             
-            # Cache metadata table for backward compatibility
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS cache_metadata (
-                    cache_key TEXT PRIMARY KEY,
-                    data_type TEXT NOT NULL,
-                    timestamp TIMESTAMP NOT NULL,
-                    expiry TIMESTAMP,
-                    level INTEGER
-                )
-            """)
-            
             # Create indexes for better query performance
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_user ON query_logs(user)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_type ON query_logs(type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_start_time ON query_logs(query_start_time)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_model ON query_patterns(model_name)")
-            
-            # Analysis Results Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS analysis_results (
-                    id TEXT PRIMARY KEY,
-                    timestamp TEXT,
-                    uncovered_tables TEXT,
-                    model_coverage TEXT
-                )
-            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_user ON query_logs(user)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_type ON query_logs(type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_start_time ON query_logs(query_start_time)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_model ON query_patterns(model_name)")
             
             # Recommendations Table
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS recommendations (
                     id TEXT PRIMARY KEY,
                     type TEXT,
@@ -137,7 +224,7 @@ class QueryLogsCacheManager:
             """)
             
             # Analysis Cache Table
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS analysis_cache (
                     cache_key TEXT PRIMARY KEY,
                     data TEXT,
@@ -148,7 +235,7 @@ class QueryLogsCacheManager:
             """)
             
             # Pattern Relationships Table
-            conn.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS pattern_relationships (
                     source_pattern_id TEXT,
                     target_pattern_id TEXT,
@@ -156,57 +243,6 @@ class QueryLogsCacheManager:
                     confidence REAL,
                     created_at TEXT,
                     PRIMARY KEY (source_pattern_id, target_pattern_id, relationship_type)
-                )
-            """)
-            
-            # DBT Models Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS dbt_models (
-                    name TEXT PRIMARY KEY,
-                    path TEXT,
-                    materialization TEXT,
-                    freshness_hours REAL
-                )
-            """)
-            
-            # Model Columns Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_columns (
-                    model_name TEXT,
-                    column_name TEXT,
-                    column_type TEXT,
-                    PRIMARY KEY (model_name, column_name),
-                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
-                )
-            """)
-            
-            # Model Tests Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_tests (
-                    model_name TEXT,
-                    test_name TEXT,
-                    PRIMARY KEY (model_name, test_name),
-                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
-                )
-            """)
-            
-            # Model Dependencies Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_dependencies (
-                    model_name TEXT,
-                    depends_on TEXT,
-                    PRIMARY KEY (model_name, depends_on),
-                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
-                )
-            """)
-            
-            # Model References Table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_references (
-                    model_name TEXT,
-                    referenced_by TEXT,
-                    PRIMARY KEY (model_name, referenced_by),
-                    FOREIGN KEY (model_name) REFERENCES dbt_models(name)
                 )
             """)
             
@@ -335,6 +371,8 @@ class QueryLogsCacheManager:
                 return self.get_cached_query_logs(cache_key)
             elif data_type == 'dbt_analysis':
                 return self.get_cached_dbt_analysis(cache_key)
+            elif data_type == 'pattern_analysis':
+                return self.get_cached_patterns(cache_key)
             else:
                 # For backward compatibility, try the old way
                 return self._get_legacy_cached_data(cache_key)
@@ -353,20 +391,78 @@ class QueryLogsCacheManager:
         """Cache data with the given key"""
         if isinstance(data, list) and all(isinstance(x, QueryLog) for x in data):
             self.cache_query_logs(data, cache_key)
+        elif isinstance(data, list) and len(data) > 0 and hasattr(data[0], 'pattern_id'):
+            self.cache_patterns(data, cache_key)
         elif isinstance(data, AnalysisResult):
             self.cache_dbt_analysis(data, cache_key)
         else:
-            # For backward compatibility, use the old way
+            # For truly legacy data that doesn't fit our schema
             self._cache_legacy_data(cache_key, data)
+            
+    def cache_patterns(self, patterns: List[Any], cache_key: str):
+        """Cache pattern analysis results using direct SQL inserts"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now().timestamp()
+            
+            for pattern in patterns:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO patterns (
+                        pattern_id, sql_pattern, frequency, total_duration_ms,
+                        users, tables_accessed, first_seen, last_seen,
+                        cache_key, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    pattern.pattern_id,
+                    pattern.sql_pattern,
+                    pattern.frequency,
+                    pattern.total_duration_ms,
+                    ','.join(pattern.users),
+                    ','.join(pattern.tables_accessed),
+                    pattern.first_seen.timestamp() if pattern.first_seen else None,
+                    pattern.last_seen.timestamp() if pattern.last_seen else None,
+                    cache_key,
+                    timestamp
+                ))
+                
+            # Update cache metadata
+            cursor.execute("""
+                INSERT OR REPLACE INTO cache_metadata (
+                    cache_key, data_type, timestamp, expiry, level
+                ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                cache_key, 'pattern_analysis', datetime.now().isoformat(),
+                (datetime.now() + self.cache_durations[2]).isoformat(), 2
+            ))
 
-    def _cache_legacy_data(self, cache_key: str, data: Any):
-        """Fallback method for old cache format"""
+    def get_cached_patterns(self, cache_key: str) -> List[Any]:
+        """Retrieve cached patterns"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT OR REPLACE INTO analysis_cache (cache_key, data, timestamp)
-                VALUES (?, ?, ?)
-            """, (cache_key, json.dumps(data), datetime.now().timestamp()))
+                SELECT pattern_id, sql_pattern, frequency, total_duration_ms,
+                       users, tables_accessed, first_seen, last_seen
+                FROM patterns
+                WHERE cache_key = ?
+                ORDER BY frequency DESC
+            """, (cache_key,))
+            
+            patterns = []
+            for row in cursor.fetchall():
+                pattern = QueryPattern(
+                    pattern_id=row[0],
+                    sql_pattern=row[1],
+                    model_name='',  
+                    frequency=row[2],
+                    total_duration_ms=row[3],
+                    users=set(row[4].split(',')) if row[4] else set(),
+                    tables_accessed=set(row[5].split(',')) if row[5] else set(),
+                    first_seen=datetime.fromtimestamp(row[6]) if row[6] else None,
+                    last_seen=datetime.fromtimestamp(row[7]) if row[7] else None
+                )
+                patterns.append(pattern)
+                
+            return patterns
 
     def enrich_patterns(self, new_patterns: List[QueryPattern]) -> List[QueryPattern]:
         """Enrich new patterns with historical data and maintain version history"""
@@ -636,13 +732,16 @@ class QueryLogsCacheManager:
             # Store analysis result metadata
             cursor.execute("""
                 INSERT OR REPLACE INTO analysis_results (
-                    id, timestamp, uncovered_tables, model_coverage
-                ) VALUES (?, ?, ?, ?)
+                    result_id, timestamp, query_patterns, dbt_models, uncovered_tables, model_coverage, cache_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 cache_key,
                 analysis_result.timestamp.isoformat(),
+                json.dumps([pattern.pattern_id for pattern in analysis_result.query_patterns]),
+                json.dumps(list(analysis_result.dbt_models.keys())),
                 uncovered_tables,
-                model_coverage
+                model_coverage,
+                cache_key
             ))
             
             # Update cache metadata
@@ -676,7 +775,7 @@ class QueryLogsCacheManager:
             
             # Get analysis result metadata
             cursor.execute("""
-                SELECT * FROM analysis_results WHERE id = ?
+                SELECT * FROM analysis_results WHERE result_id = ?
             """, (cache_key,))
             result_row = cursor.fetchone()
             if not result_row:
@@ -730,11 +829,46 @@ class QueryLogsCacheManager:
                 
                 dbt_models[model.name] = model
             
+            # Get query patterns
+            pattern_ids = json.loads(result_row['query_patterns'])
+            query_patterns = []
+            if pattern_ids:
+                cursor.execute("""
+                    SELECT * FROM patterns 
+                    WHERE pattern_id IN ({})
+                """.format(','.join(['?'] * len(pattern_ids))), pattern_ids)
+                
+                for pattern_row in cursor.fetchall():
+                    pattern = QueryPattern(
+                        pattern_id=pattern_row['pattern_id'],
+                        sql_pattern=pattern_row['sql_pattern'],
+                        model_name='',  # Will be set during coverage calculation
+                        frequency=pattern_row['frequency'],
+                        total_duration_ms=pattern_row['total_duration_ms'],
+                        users=set(pattern_row['users'].split(',')) if pattern_row['users'] else set(),
+                        tables_accessed=set(pattern_row['tables_accessed'].split(',')) if pattern_row['tables_accessed'] else set(),
+                        first_seen=datetime.fromtimestamp(pattern_row['first_seen']) if pattern_row['first_seen'] else None,
+                        last_seen=datetime.fromtimestamp(pattern_row['last_seen']) if pattern_row['last_seen'] else None
+                    )
+                    query_patterns.append(pattern)
+            
             # Create AnalysisResult
-            return AnalysisResult(
+            result = AnalysisResult(
                 timestamp=datetime.fromisoformat(result_row['timestamp']),
-                query_patterns=[],  # Will be populated by pattern analysis
+                query_patterns=query_patterns,
                 dbt_models=dbt_models,
                 uncovered_tables=set(json.loads(result_row['uncovered_tables'])),
-                model_coverage=json.loads(result_row['model_coverage'])
+                model_coverage=json.loads(result_row['model_coverage']),
+                dbt_mapper=None  # Will be set by the caller
             )
+            
+            return result
+
+    def _cache_legacy_data(self, cache_key: str, data: Any):
+        """Fallback method for old cache format"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO analysis_cache (cache_key, data, timestamp)
+                VALUES (?, ?, ?)
+            """, (cache_key, json.dumps(data), datetime.now().timestamp()))

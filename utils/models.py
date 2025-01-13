@@ -53,7 +53,7 @@ class QueryLog:
             'query': self.query,
             'type': self.type,
             'user': self.user,
-            'query_start_time': self.query_start_time.isoformat(),  # Convert datetime to string
+            'query_start_time': self.query_start_time.isoformat(),
             'query_duration_ms': self.query_duration_ms,
             'read_rows': self.read_rows,
             'read_bytes': self.read_bytes,
@@ -203,43 +203,63 @@ class AnalysisResult:
             self.model_coverage = {
                 "covered": 0.0,
                 "uncovered": 0.0,
-                "total_models": 0
+                "total_models": 0,
+                "used_models": [],
+                "unused_models": []
             }
             return
             
         # Track which models are used
         used_models = set()
+        self.uncovered_tables = set()  # Reset uncovered tables
         
         # Process each query pattern
         for pattern in self.query_patterns:
             # Extract tables from the SQL pattern
             tables = extract_tables_from_query(pattern.sql_pattern)
-            
-            # Update tables accessed
             pattern.tables_accessed = tables
             
-            # Try to map each table to a dbt model
+            # Try to map each table to a dbt model or source
             for table in tables:
                 # Try different variations of the table name
                 model_name = self.dbt_mapper.get_model_name(table)
                 if model_name:
                     used_models.add(model_name)
                     pattern.dbt_models_used.add(model_name)
+                    
+                    # Also add any upstream models that this model depends on
+                    model = self.dbt_models.get(model_name)
+                    if model:
+                        used_models.update(model.depends_on)
+                else:
+                    # Check if it's a source reference
+                    for source_ref, physical_table in self.dbt_mapper.source_refs.items():
+                        if (physical_table.lower() == table.lower() or 
+                            physical_table.lower().endswith('.' + table.lower())):
+                            # Found a source match
+                            pattern.dbt_models_used.add(f"source:{source_ref}")
+                            break
+                    else:
+                        # No model or source found
+                        self.uncovered_tables.add(table)
         
         # Calculate coverage
         total_models = len(all_dbt_models)
         covered_models = len(used_models)
-        self.uncovered_tables = all_dbt_models - used_models
+        uncovered_models = all_dbt_models - used_models
         
         self.model_coverage = {
             "covered": (covered_models / total_models * 100) if total_models > 0 else 0.0,
-            "uncovered": (len(self.uncovered_tables) / total_models * 100) if total_models > 0 else 0.0,
+            "uncovered": (len(uncovered_models) / total_models * 100) if total_models > 0 else 0.0,
             "total_models": total_models,
-            "used_models": list(used_models),  # Add list of actually used models
-            "unused_models": list(self.uncovered_tables)  # Add list of unused models
+            "used_models": sorted(list(used_models)),  # Sort for consistent output
+            "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output
+            "source_refs": sorted(list(self.dbt_mapper.source_refs.keys())) if self.dbt_mapper else []
         }
         
         logger.info(f"Coverage calculation complete: {covered_models}/{total_models} models used")
+        if self.uncovered_tables:
+            logger.info(f"Found {len(self.uncovered_tables)} uncovered tables")
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""
@@ -255,14 +275,19 @@ class AnalysisResult:
     @classmethod
     def from_dict(cls, data: Dict) -> 'AnalysisResult':
         """Create from dictionary"""
-        return cls(
+        result = cls(
             timestamp=datetime.fromisoformat(data['timestamp']),
             query_patterns=[QueryPattern.from_dict(pattern) for pattern in data['query_patterns']],
             dbt_models={name: DBTModel.from_dict(model) for name, model in data['dbt_models'].items()},
             uncovered_tables=set(data['uncovered_tables']),
-            model_coverage=data['model_coverage'],
-            dbt_mapper=DBTModelMapper.from_dict(data['dbt_mapper']) if data.get('dbt_mapper') else None
+            model_coverage=data['model_coverage']
         )
+        
+        # Handle dbt_mapper separately to avoid circular imports
+        if data.get('dbt_mapper'):
+            result.dbt_mapper = DBTModelMapper.from_dict(data['dbt_mapper'])
+            
+        return result
 
 @dataclass
 class AIRecommendation:
