@@ -5,6 +5,8 @@ from enum import Enum
 import hashlib
 import json
 from utils.logger import setup_logger
+from .sql_parser import extract_tables_from_query
+from .dbt_mapper import DBTModelMapper
 
 logger = setup_logger(__name__)
 
@@ -74,6 +76,7 @@ class QueryPattern:
     last_seen: Optional[datetime] = None
     users: Set[str] = field(default_factory=set)
     tables_accessed: Set[str] = field(default_factory=set)
+    dbt_models_used: Set[str] = field(default_factory=set)  # New field for dbt models
     
     @property
     def complexity_score(self) -> float:
@@ -99,6 +102,39 @@ class QueryPattern:
             
         self.users.add(log.user)
 
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization"""
+        return {
+            'pattern_id': self.pattern_id,
+            'sql_pattern': self.sql_pattern,
+            'model_name': self.model_name,
+            'frequency': self.frequency,
+            'total_duration_ms': self.total_duration_ms,
+            'avg_duration_ms': self.avg_duration_ms,
+            'first_seen': self.first_seen.isoformat() if self.first_seen else None,
+            'last_seen': self.last_seen.isoformat() if self.last_seen else None,
+            'users': list(self.users),
+            'tables_accessed': list(self.tables_accessed),
+            'dbt_models_used': list(self.dbt_models_used)
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'QueryPattern':
+        """Create from dictionary"""
+        return cls(
+            pattern_id=data['pattern_id'],
+            sql_pattern=data['sql_pattern'],
+            model_name=data['model_name'],
+            frequency=data['frequency'],
+            total_duration_ms=data['total_duration_ms'],
+            avg_duration_ms=data['avg_duration_ms'],
+            first_seen=datetime.fromisoformat(data['first_seen']) if data.get('first_seen') else None,
+            last_seen=datetime.fromisoformat(data['last_seen']) if data.get('last_seen') else None,
+            users=set(data['users']),
+            tables_accessed=set(data['tables_accessed']),
+            dbt_models_used=set(data['dbt_models_used'])
+        )
+
 @dataclass
 class DBTModel:
     """Representation of a dbt model"""
@@ -117,6 +153,33 @@ class DBTModel:
     def add_reference(self, model_name: str) -> None:
         self.referenced_by.add(model_name)
 
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization"""
+        return {
+            'name': self.name,
+            'path': self.path,
+            'depends_on': list(self.depends_on),
+            'referenced_by': list(self.referenced_by),
+            'columns': self.columns,
+            'tests': self.tests,
+            'materialization': self.materialization,
+            'freshness': self.freshness.total_seconds() if self.freshness else None
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'DBTModel':
+        """Create from dictionary"""
+        return cls(
+            name=data['name'],
+            path=data['path'],
+            depends_on=set(data['depends_on']),
+            referenced_by=set(data['referenced_by']),
+            columns=data['columns'],
+            tests=data['tests'],
+            materialization=data['materialization'],
+            freshness=timedelta(seconds=data['freshness']) if data.get('freshness') else None
+        )
+
 @dataclass
 class AnalysisResult:
     """Comprehensive analysis result combining all data sources"""
@@ -125,73 +188,105 @@ class AnalysisResult:
     dbt_models: Dict[str, DBTModel]
     uncovered_tables: Set[str] = field(default_factory=set)
     model_coverage: Dict[str, float] = field(default_factory=dict)
+    dbt_mapper: Optional[DBTModelMapper] = None
     
     def calculate_coverage(self) -> None:
-        """Calculate coverage metrics"""
-        all_tables = set()
-        covered_tables = set()
-        
-        # Collect all tables from query patterns
-        for pattern in self.query_patterns:
-            all_tables.update(pattern.tables_accessed)
-        
-        # Check which tables are covered by dbt models
-        for model in self.dbt_models.values():
-            covered_tables.add(model.name)
+        """Calculate coverage metrics with improved table matching."""
+        if not self.dbt_mapper:
+            logger.warning("No dbt mapper available, coverage calculation may be incomplete")
+            return
             
-        self.uncovered_tables = all_tables - covered_tables
+        # Get all dbt models
+        all_dbt_models = set(self.dbt_models.keys())
+        if not all_dbt_models:
+            logger.warning("No dbt models found")
+            self.model_coverage = {
+                "covered": 0.0,
+                "uncovered": 0.0,
+                "total_models": 0
+            }
+            return
+            
+        # Track which models are used
+        used_models = set()
         
-        # Calculate coverage percentages
-        if not all_tables:
-            # No tables found in query patterns
-            self.model_coverage = {
-                "covered": 0.0,  # No tables to cover
-                "uncovered": 0.0
-            }
-        else:
-            total_tables = len(all_tables)
-            self.model_coverage = {
-                "covered": len(covered_tables) / total_tables * 100,
-                "uncovered": len(self.uncovered_tables) / total_tables * 100
-            }
-
-@dataclass
-class AIRecommendation:
-    """AI-generated recommendation for improvement"""
-    id: str
-    pattern_id: str
-    suggestion_type: str
-    description: str
-    impact_score: float
-    implementation_difficulty: float
-    suggested_sql: Optional[str] = None
-    affected_models: Set[str] = field(default_factory=set)
-    estimated_benefits: Dict[str, float] = field(default_factory=dict)
-    status: str = "pending"  # pending, approved, implemented, rejected
-    
-    @property
-    def priority_score(self) -> float:
-        """Calculate priority score based on impact and difficulty"""
-        return self.impact_score * (1 - self.implementation_difficulty * 0.5)
+        # Process each query pattern
+        for pattern in self.query_patterns:
+            # Extract tables from the SQL pattern
+            tables = extract_tables_from_query(pattern.sql_pattern)
+            
+            # Update tables accessed
+            pattern.tables_accessed = tables
+            
+            # Try to map each table to a dbt model
+            for table in tables:
+                # Try different variations of the table name
+                model_name = self.dbt_mapper.get_model_name(table)
+                if model_name:
+                    used_models.add(model_name)
+                    pattern.dbt_models_used.add(model_name)
+        
+        # Calculate coverage
+        total_models = len(all_dbt_models)
+        covered_models = len(used_models)
+        self.uncovered_tables = all_dbt_models - used_models
+        
+        self.model_coverage = {
+            "covered": (covered_models / total_models * 100) if total_models > 0 else 0.0,
+            "uncovered": (len(self.uncovered_tables) / total_models * 100) if total_models > 0 else 0.0,
+            "total_models": total_models,
+            "used_models": list(used_models),  # Add list of actually used models
+            "unused_models": list(self.uncovered_tables)  # Add list of unused models
+        }
+        
+        logger.info(f"Coverage calculation complete: {covered_models}/{total_models} models used")
 
     def to_dict(self) -> Dict:
-        """Convert to dictionary for storage"""
+        """Convert to dictionary for serialization"""
         return {
-            "id": self.id,
-            "pattern_id": self.pattern_id,
-            "suggestion_type": self.suggestion_type,
-            "description": self.description,
-            "impact_score": self.impact_score,
-            "implementation_difficulty": self.implementation_difficulty,
-            "suggested_sql": self.suggested_sql,
-            "affected_models": list(self.affected_models),
-            "estimated_benefits": self.estimated_benefits,
-            "status": self.status
+            'timestamp': self.timestamp.isoformat(),
+            'query_patterns': [pattern.to_dict() for pattern in self.query_patterns],
+            'dbt_models': {name: model.to_dict() for name, model in self.dbt_models.items()},
+            'uncovered_tables': list(self.uncovered_tables),
+            'model_coverage': self.model_coverage,
+            'dbt_mapper': self.dbt_mapper.to_dict() if self.dbt_mapper else None
         }
 
     @classmethod
+    def from_dict(cls, data: Dict) -> 'AnalysisResult':
+        """Create from dictionary"""
+        return cls(
+            timestamp=datetime.fromisoformat(data['timestamp']),
+            query_patterns=[QueryPattern.from_dict(pattern) for pattern in data['query_patterns']],
+            dbt_models={name: DBTModel.from_dict(model) for name, model in data['dbt_models'].items()},
+            uncovered_tables=set(data['uncovered_tables']),
+            model_coverage=data['model_coverage'],
+            dbt_mapper=DBTModelMapper.from_dict(data['dbt_mapper']) if data.get('dbt_mapper') else None
+        )
+
+@dataclass
+class AIRecommendation:
+    """AI-generated recommendation for query optimization"""
+    type: str
+    description: str
+    impact: str
+    suggested_sql: Optional[str] = None
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization"""
+        return {
+            'type': self.type,
+            'description': self.description,
+            'impact': self.impact,
+            'suggested_sql': self.suggested_sql
+        }
+    
+    @classmethod
     def from_dict(cls, data: Dict) -> 'AIRecommendation':
-        """Create instance from dictionary"""
-        data = data.copy()
-        data['affected_models'] = set(data['affected_models'])
-        return cls(**data)
+        """Create from dictionary"""
+        return cls(
+            type=data['type'],
+            description=data['description'],
+            impact=data['impact'],
+            suggested_sql=data.get('suggested_sql')
+        )
