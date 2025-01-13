@@ -1,30 +1,29 @@
 import os
 import yaml
 import glob
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import re
 from datetime import datetime
+import json
 from .models import DBTModel, AnalysisResult
 import logging
 logger = logging.getLogger(__name__)
 
 class DBTProjectAnalyzer:
+    """Analyzes dbt project structure and maps tables to models."""
+    
     def __init__(self, project_path: str):
         self.project_path = project_path
         logger.info(f"Initializing DBTProjectAnalyzer with path: {project_path}")
         self.models_path = os.path.join(project_path, 'models')
+        self.target_path = os.path.join(project_path, 'target')
         self.models: Dict[str, DBTModel] = {}
+        self.table_to_model: Dict[str, str] = {}  # Maps physical table names to model names
         
     def analyze_project(self) -> AnalysisResult:
-        """
-        Analyze the dbt project structure and return relevant information
-        """
+        """Analyze the dbt project structure and return relevant information"""
         try:
-            # Check if project path exists and is accessible
-            logger.info(f"Checking dbt project path: {self.project_path}")
-            logger.info(f"Path exists: {os.path.exists(self.project_path) if self.project_path else False}")
             if not self.project_path or not os.path.exists(self.project_path):
-                # Return empty analysis result if no dbt project
                 return AnalysisResult(
                     timestamp=datetime.now(),
                     query_patterns=[],
@@ -33,18 +32,32 @@ class DBTProjectAnalyzer:
                     model_coverage={}
                 )
             
+            # Load project configuration
             project_config = self._read_project_config()
-            self._analyze_models()
+            default_schema = project_config.get('models', {}).get('schema', 'public')
+            default_database = project_config.get('models', {}).get('database', 'default')
+            
+            # Load manifest if available
+            manifest = self._load_manifest()
+            if manifest:
+                self._load_from_manifest(manifest, default_schema, default_database)
+            else:
+                # Fallback to file-based analysis
+                self._analyze_models()
+            
+            # Analyze model dependencies
             self._analyze_dependencies()
             
             return AnalysisResult(
                 timestamp=datetime.now(),
                 query_patterns=[],  # To be filled by data acquisition
-                dbt_models=self.models
+                dbt_models=self.models,
+                uncovered_tables=set(),
+                model_coverage={}
             )
+            
         except Exception as e:
             logger.warning(f"Failed to analyze dbt project: {str(e)}")
-            # Return empty analysis result on error
             return AnalysisResult(
                 timestamp=datetime.now(),
                 query_patterns=[],
@@ -52,21 +65,74 @@ class DBTProjectAnalyzer:
                 uncovered_tables=set(),
                 model_coverage={}
             )
-
-    def _read_project_config(self) -> Dict[str, Any]:
-        """
-        Read and parse dbt_project.yml
-        """
-        project_file = os.path.join(self.project_path, 'dbt_project.yml')
-        if not os.path.exists(project_file):
-            return {}  # Return empty config if file doesn't exist
+    
+    def get_model_for_table(self, table_name: str) -> Optional[str]:
+        """Get the dbt model name for a physical table"""
+        # Try exact match first
+        if table_name in self.table_to_model:
+            return self.table_to_model[table_name]
             
+        # Try schema.table format
+        if '.' in table_name:
+            base_name = table_name.split('.')[-1]
+            if base_name in self.table_to_model:
+                return self.table_to_model[base_name]
+        
+        return None
+    
+    def _load_manifest(self) -> Optional[Dict]:
+        """Load dbt manifest.json if available"""
+        manifest_path = os.path.join(self.target_path, 'manifest.json')
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load manifest.json: {str(e)}")
+        return None
+    
+    def _load_from_manifest(self, manifest: Dict, default_schema: str, default_database: str) -> None:
+        """Load model information from dbt manifest"""
+        nodes = manifest.get('nodes', {})
+        for node_id, node in nodes.items():
+            if node.get('resource_type') == 'model':
+                model_name = node.get('name')
+                if not model_name:
+                    continue
+                    
+                # Get model configuration
+                config = node.get('config', {})
+                schema = config.get('schema', default_schema)
+                database = config.get('database', default_database)
+                materialized = config.get('materialized', 'view')
+                
+                # Create model and map physical table
+                model = DBTModel(
+                    name=model_name,
+                    path=node.get('original_file_path', ''),
+                    materialization=materialized
+                )
+                
+                # Add to models dict
+                self.models[model_name] = model
+                
+                # Map physical table names
+                physical_name = f"{database}.{schema}.{model_name}"
+                self.table_to_model[physical_name] = model_name
+                self.table_to_model[f"{schema}.{model_name}"] = model_name
+                self.table_to_model[model_name] = model_name
+    
+    def _read_project_config(self) -> Dict:
+        """Read dbt project configuration"""
         try:
-            with open(project_file, 'r') as f:
-                return yaml.safe_load(f)
-        except Exception:
-            return {}  # Return empty config on error
-
+            config_path = os.path.join(self.project_path, 'dbt_project.yml')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    return yaml.safe_load(f)
+        except Exception as e:
+            logger.warning(f"Failed to read project config: {str(e)}")
+        return {}
+    
     def _analyze_models(self) -> None:
         """
         Analyze all SQL models in the project
