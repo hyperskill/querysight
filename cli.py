@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 
-import click
-import sys
-import json
-from datetime import datetime, timedelta
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress
-from rich.panel import Panel
-from rich.syntax import Syntax
-from typing import Optional, Dict, List
-import logging
-from enum import Enum
-import hashlib
+"""Command-line interface for QuerySight.
+Provides tools for analyzing ClickHouse query patterns and generating optimization recommendations."""
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+import json
+import logging
+import sys
+import hashlib
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Optional, Dict, List
+
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress
+from rich.table import Table
+from rich.syntax import Syntax
+from rich.text import Text
 
 from utils.config import Config
 from utils.models import (
-    QueryLog, QueryPattern, DBTModel, AnalysisResult, 
-    AIRecommendation, QueryType, QueryFocus
+    AnalysisResult, QueryPattern, QueryLog,
+    AIRecommendation, QueryKind, QueryFocus, DBTModel
 )
 from utils.data_acquisition import ClickHouseDataAcquisition
 from utils.dbt_analyzer import DBTProjectAnalyzer
 from utils.ai_suggester import AISuggester
 from utils.cache_manager import QueryLogsCacheManager
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -57,32 +58,108 @@ def validate_connection(data_acquisition: ClickHouseDataAcquisition) -> None:
         console.print(f"[red]Error connecting to ClickHouse: {str(e)}[/red]")
         sys.exit(1)
 
-def display_query_patterns(patterns: List[QueryPattern]) -> None:
-    """Display analyzed query patterns in a table"""
+def display_query_patterns(patterns: List[QueryPattern], sort_by: str = 'duration', page_size: int = 20):
+    """Display analyzed query patterns in a table with sorting and pagination"""
     if not patterns:
         console.print("[yellow]No query patterns found[/yellow]")
         return
-        
-    table = Table(title="Query Patterns")
-    table.add_column("Pattern ID", style="cyan")
-    table.add_column("Model", style="green")
-    table.add_column("Frequency", justify="right")
-    table.add_column("Avg Duration (ms)", justify="right")
-    table.add_column("Tables", style="blue")
-    table.add_column("DBT Models", style="magenta")
-    
-    for pattern in patterns:
-        table.add_row(
-            str(pattern.pattern_id),
-            pattern.model_name or "N/A",
-            str(pattern.frequency),
-            f"{pattern.avg_duration_ms:.2f}",
-            ", ".join(pattern.tables_accessed) or "N/A",
-            ", ".join(pattern.dbt_models_used) or "N/A"
+
+    # Sort patterns
+    if sort_by == 'frequency':
+        patterns.sort(key=lambda p: p.frequency, reverse=True)
+    elif sort_by == 'duration':
+        patterns.sort(key=lambda p: p.avg_duration_ms, reverse=True)
+    elif sort_by == 'memory':
+        patterns.sort(key=lambda p: sum(p.memory_usage) / p.frequency if p.frequency > 0 else 0, reverse=True)
+
+    # Calculate total pages
+    total_patterns = len(patterns)
+    total_pages = (total_patterns + page_size - 1) // page_size
+
+    for current_page in range(1, total_pages + 1):
+        start_idx = (current_page - 1) * page_size
+        end_idx = min(start_idx + page_size, total_patterns)
+        page_patterns = patterns[start_idx:end_idx]
+
+        table = Table(
+            title=f"Query Patterns (Page {current_page}/{total_pages})",
+            show_lines=True,
+            expand=True
         )
+
+        # Add columns
+        table.add_column("Pattern ID", style="cyan", no_wrap=True)
+        table.add_column("Frequency", justify="right")
+        table.add_column("Avg Duration", justify="right")
+        table.add_column("Memory (MB)", justify="right")
+        table.add_column("Users", style="blue")
+        table.add_column("Tables", style="magenta")
+        table.add_column("First Seen", style="green")
+        table.add_column("Last Seen", style="green")
+
+        # Add rows with color coding
+        for pattern in page_patterns:
+            # Color code based on duration
+            duration_style = (
+                "red" if pattern.avg_duration_ms > 1000 else  # > 1s
+                "yellow" if pattern.avg_duration_ms > 100 else  # > 100ms
+                "green"
+            )
+
+            avg_memory_mb = pattern.memory_usage / (1024 * 1024) if pattern.memory_usage else 0
+            users_display = (", ".join(sorted(pattern.users)[:3]) + "...") if len(pattern.users) > 3 else ", ".join(pattern.users)
+            tables_display = (", ".join(sorted(pattern.tables_accessed)[:3]) + "...") if len(pattern.tables_accessed) > 3 else ", ".join(pattern.tables_accessed)
+
+            table.add_row(
+                pattern.pattern_id[:12] + "...",
+                str(pattern.frequency),
+                Text(f"{pattern.avg_duration_ms:,.2f} ms", style=duration_style),
+                f"{avg_memory_mb:,.2f}",
+                users_display or "N/A",
+                tables_display or "N/A",
+                pattern.first_seen.strftime("%Y-%m-%d %H:%M") if pattern.first_seen else "N/A",
+                pattern.last_seen.strftime("%Y-%m-%d %H:%M") if pattern.last_seen else "N/A"
+            )
+
+        console.print(table)
+        if current_page < total_pages:
+            console.print("\n" + "─" * 80 + "\n")  # Page separator
+
+    console.print(f"\nTotal Patterns: {total_patterns}")
     
-    console.print(table)
-    console.print(f"\nTotal Patterns: {len(patterns)}")
+    # Print summary statistics
+    console.print("\n[bold]Summary Statistics[/bold]")
+    stats_table = Table(show_header=False, show_lines=True)
+    stats_table.add_column("Metric", style="cyan")
+    stats_table.add_column("Value", style="green")
+    
+    # Calculate statistics
+    total_queries = sum(p.frequency for p in patterns)
+    total_duration_ms = sum(p.avg_duration_ms * p.frequency for p in patterns)
+    total_memory = sum(p.memory_usage for p in patterns)
+    unique_users = len(set().union(*[p.users for p in patterns]))
+    unique_tables = len(set().union(*[p.tables_accessed for p in patterns]))
+    
+    # Calculate percentages for slow/medium/fast queries
+    slow_queries = sum(p.frequency for p in patterns if p.avg_duration_ms > 1000)
+    medium_queries = sum(p.frequency for p in patterns if 100 < p.avg_duration_ms <= 1000)
+    fast_queries = sum(p.frequency for p in patterns if p.avg_duration_ms <= 100)
+    
+    # Add rows with enhanced formatting
+    stats_table.add_row("Query Count", f"{total_queries:,}")
+    stats_table.add_row("Total Duration", f"{total_duration_ms/1000:,.2f} seconds")
+    stats_table.add_row("Avg Duration per Query", f"{total_duration_ms/total_queries:,.2f} ms")
+    stats_table.add_row("Total Memory Usage", f"{total_memory/(1024*1024):,.2f} MB")
+    stats_table.add_row("Avg Memory per Query", f"{total_memory/(1024*1024*total_queries):,.2f} MB")
+    stats_table.add_row("Unique Users", str(unique_users))
+    stats_table.add_row("Unique Tables", str(unique_tables))
+    stats_table.add_row("Query Speed Distribution", 
+        f"Slow (>1s): {slow_queries/total_queries*100:.1f}%\n"
+        f"Medium (100ms-1s): {medium_queries/total_queries*100:.1f}%\n"
+        f"Fast (<100ms): {fast_queries/total_queries*100:.1f}%"
+    )
+    
+    console.print(stats_table)
 
 def display_model_coverage(result: AnalysisResult):
     """Display dbt model coverage metrics"""
@@ -140,44 +217,52 @@ def display_recommendations(recommendations: List[AIRecommendation]):
 
 @click.group()
 def cli():
-    """QuerySight CLI - Analyze ClickHouse query patterns and optimize dbt models"""
+    """QuerySight CLI - A tool for analyzing ClickHouse query patterns and optimizing dbt models.
+
+    Available Commands:
+      analyze    Analyze query patterns and generate optimization recommendations
+      export     Export the latest analysis results to JSON format
+    """
     pass
 
 @cli.command()
-@click.option('--days', default=7, help='Number of days to analyze')
-@click.option('--focus', default='all', help='Focus of analysis (slow/frequent/all)')
-@click.option('--min-frequency', default=2, help='Minimum query frequency')
-@click.option('--sample-size', default=1.0, help='Sample size for query logs')
-@click.option('--batch-size', default=1000, help='Batch size for processing')
-@click.option('--include-users', help='Users to include (comma-separated)')
-@click.option('--exclude-users', help='Users to exclude (comma-separated)')
-@click.option('--query-types', help='Query types to analyze (comma-separated)')
-@click.option('--cache/--no-cache', default=True, help='Use cache')
-@click.option('--level', default='optimization', help='Analysis level (data_collection/pattern_analysis/dbt_integration/optimization)')
-@click.option('--dbt-project', help='Path to dbt project')
-@click.option('--select-patterns', help='Pattern IDs to analyze (comma-separated)')
-@click.option('--select-models', help='DBT model names to analyze (comma-separated)')
-def analyze(
-    days: int,
-    focus: str,
-    min_frequency: int,
-    sample_size: float,
-    batch_size: int,
-    include_users: Optional[str],
-    exclude_users: Optional[str],
-    query_types: Optional[str],
-    cache: bool,
-    level: str,
-    dbt_project: Optional[str],
-    select_patterns: Optional[str],
-    select_models: Optional[str]
-):
-    """Analyze query patterns and generate recommendations"""
+@click.option('--days', default=7, help='Number of days of query history to analyze')
+@click.option('--focus', default='all', help='Analysis focus: slow (long-running queries), frequent (high-frequency queries), or all')
+@click.option('--min-frequency', default=2, help='Minimum frequency threshold for query patterns')
+@click.option('--sample-size', default=1.0, help='Sample size ratio (0.0-1.0) of query logs to analyze')
+@click.option('--batch-size', default=1000, help='Number of queries to process in each batch')
+@click.option('--include-users', help='Filter specific users to include (comma-separated)')
+@click.option('--exclude-users', help='Filter specific users to exclude (comma-separated)')
+@click.option('--query-kinds', help='Types of queries to analyze (comma-separated)')
+@click.option('--cache/--no-cache', default=True, help='Enable/disable caching of query logs')
+@click.option('--force-reset', is_flag=True, help='Force reset of cache database')
+@click.option('--level', default='optimization', help='Analysis depth: data_collection, pattern_analysis, dbt_integration, or optimization')
+@click.option('--dbt-project', help='Path to dbt project for model analysis')
+@click.option('--select-patterns', help='Filter specific query patterns to analyze (comma-separated IDs)')
+@click.option('--select-models', help='Filter specific dbt models to analyze (comma-separated names)')
+@click.option('--sort-by', type=click.Choice(['frequency', 'duration', 'memory']), default='duration',
+              help='Sort patterns by frequency, duration, or memory usage')
+@click.option('--page-size', type=int, default=20, help='Number of patterns to show per page')
+def analyze(days, focus, min_frequency, sample_size, batch_size, include_users,
+           exclude_users, query_kinds, cache, force_reset, level, dbt_project, select_patterns,
+           select_models, sort_by, page_size):
     try:
+        logger.info("Starting analysis with parameters:")
+        logger.info(f"  Days: {days}")
+        logger.info(f"  Focus: {focus}")
+        logger.info(f"  Include users: {include_users}")
+        logger.info(f"  Query kinds: {query_kinds}")
+        logger.info(f"  Level: {level}")
+        
         # Initialize components and parameters
-        components = initialize_analysis_components(dbt_project)
-        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_types)
-        target_level = level.lower()  # Use string comparison instead of enum
+        components = initialize_analysis_components(dbt_project, force_reset)
+        logger.info("Components initialized")
+        
+        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds)
+        logger.info(f"Analysis parameters prepared: {params}")
+        
+        target_level = level.lower()
+        logger.info(f"Target analysis level: {target_level}")
         
         # Create progress tracking
         with Progress() as progress:
@@ -242,7 +327,7 @@ def analyze(
         console.print(f"[red]Error: {str(e)}[/red]")
         sys.exit(1)
 
-def initialize_analysis_components(dbt_project_path: Optional[str] = None) -> Dict:
+def initialize_analysis_components(dbt_project_path: Optional[str] = None, force_reset: bool = False) -> Dict:
     """Initialize and validate all required analysis components"""
     try:
         validate_config()
@@ -260,7 +345,7 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None) -> Di
         dbt_analyzer = DBTProjectAnalyzer(dbt_project_path or Config.DBT_PROJECT_PATH)
         
         # Initialize cache manager
-        cache_manager = QueryLogsCacheManager()
+        cache_manager = QueryLogsCacheManager(force_reset=force_reset)
         
         # Initialize AI suggester if API key is available
         ai_suggester = None
@@ -278,18 +363,28 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None) -> Di
         logger.error(f"Failed to initialize analysis components: {str(e)}")
         raise RuntimeError(f"Failed to initialize analysis components: {str(e)}")
 
-def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_types):
+def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds):
     """Prepare and validate analysis parameters"""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     
+    # Handle query kinds
+    if query_kinds:
+        kinds = [qt.strip().upper() for qt in query_kinds.split(',')]
+        query_kinds_list = [QueryKind[qt] for qt in kinds]
+    else:
+        query_kinds_list = None
+    
+    # Handle focus - always return a single QueryFocus enum
+    focus_enum = QueryFocus.ALL if not focus else QueryFocus[focus.upper()]
+    
     return {
         'start_date': start_date,
         'end_date': end_date,
-        'query_focus': [QueryFocus[focus.upper()]],
-        'user_include': include_users.split(',') if include_users else None,
-        'user_exclude': exclude_users.split(',') if exclude_users else None,
-        'query_types': [QueryType[qt.strip()] for qt in query_types.split(',')] if query_types else None
+        'query_focus': focus_enum,
+        'user_include': [u.lower() for u in include_users.split(',')] if include_users else None,
+        'user_exclude': [u.lower() for u in exclude_users.split(',')] if exclude_users else None,
+        'query_kinds': query_kinds_list
     }
 
 def create_progress_tasks(progress, target_level):
@@ -332,33 +427,29 @@ def create_progress_tasks(progress, target_level):
 def execute_data_collection(components, params, cache, progress, task):
     """Execute data collection level of analysis"""
     try:
-        cache_key = f"level1_{params['start_date'].isoformat()}_{params['end_date'].isoformat()}_{params['query_focus'][0].name}"
+        # Generate cache key
+        cache_key = f"level1_{params['start_date'].isoformat()}_{params['end_date'].isoformat()}_{params['query_focus'].name}"
         
         if cache and components['cache_manager'].has_valid_cache(cache_key):
-            cached_data = components['cache_manager'].get_cached_data(cache_key)
-            query_logs = [QueryLog.from_dict(log_dict) for log_dict in cached_data]
+            query_logs = components['cache_manager'].get_cached_data(cache_key)
             progress.update(task, completed=100)
             logger.info("Using cached query logs")
-            return query_logs
+        else:
+            query_logs = components['data_acquisition'].get_query_logs(
+                days=(params['end_date'] - params['start_date']).days,
+                focus=params['query_focus'],
+                include_users=params['user_include'],
+                exclude_users=params['user_exclude'],
+                query_kinds=params['query_kinds']
+            )
+            
+            if cache:
+                components['cache_manager'].cache_data(cache_key, query_logs)
+                logger.info("Cached query logs")
+            
+            progress.update(task, completed=100)
         
-        query_logs = components['data_acquisition'].get_query_logs(
-            days=30,  # Using fixed value for now
-            focus=params['query_focus'][0],
-            include_users=params['user_include'],
-            exclude_users=params['user_exclude'],
-            query_types=params['query_types'],
-            use_cache=cache
-        )
-        
-        if cache:
-            # Convert QueryLog objects to dictionaries for caching
-            log_dicts = [log.to_dict() for log in query_logs]
-            components['cache_manager'].cache_data(cache_key, log_dicts)
-            logger.info("Cached query logs")
-        
-        progress.update(task, completed=100)
         return query_logs
-        
     except Exception as e:
         logger.error(f"Data collection failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"Data collection failed: {str(e)}")
@@ -396,33 +487,33 @@ def execute_dbt_integration(components, patterns, progress, task):
         
         if components.get('cache', True) and components['cache_manager'].has_valid_cache(cache_key):
             analysis_result = components['cache_manager'].get_cached_data(cache_key)
-            progress.update(task, completed=100)
-            logger.info("Using cached DBT analysis")
-        else:
-            # Get dbt analysis
-            dbt_analyzer = components['dbt_analyzer']
-            analysis_result = dbt_analyzer.analyze_project()
             
-            # Map tables to models for each pattern
-            for pattern in patterns:
-                for table in pattern.tables_accessed:
-                    model_name = dbt_analyzer.get_model_for_table(table)
-                    if model_name:
-                        pattern.dbt_models_used.add(model_name)
-                        if not pattern.model_name:  # Set primary model name if not set
-                            pattern.model_name = model_name
-            
-            # Update analysis result with patterns
-            analysis_result.query_patterns = patterns
-            analysis_result.calculate_coverage()
-            
-            if components.get('cache', True):
-                components['cache_manager'].cache_data(cache_key, analysis_result)
-                logger.info("Cached DBT analysis")
-            
-            progress.update(task, completed=100)
+            # Only proceed if we got a valid result from cache
+            if analysis_result is not None:
+                # Ensure dbt_mapper is set even when using cached data
+                if 'dbt_analyzer' in components:
+                    analysis_result.dbt_mapper = components['dbt_analyzer']
+                    analysis_result.calculate_coverage()  # Recalculate with mapper
+                
+                progress.update(task, completed=100)
+                logger.info("Using cached DBT analysis")
+                return analysis_result
         
+        # Get dbt analysis
+        dbt_analyzer = components['dbt_analyzer']
+        analysis_result = dbt_analyzer.analyze_project()
+        
+        # Update analysis result with patterns and recalculate coverage
+        analysis_result.query_patterns = patterns
+        analysis_result.calculate_coverage()
+        
+        if components.get('cache', True):
+            components['cache_manager'].cache_data(cache_key, analysis_result)
+            logger.info("Cached DBT analysis")
+        
+        progress.update(task, completed=100)
         return analysis_result
+        
     except Exception as e:
         logger.error(f"DBT integration failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"DBT integration failed: {str(e)}")
@@ -459,9 +550,16 @@ def display_analysis_results(analysis_result, patterns, recommendations, achieve
     """Display analysis results based on achieved level"""
     console.print("\n[bold green]Analysis Complete![/bold green]\n")
     
+    # Always show query count first
+    if isinstance(patterns, list):
+        console.print(f"[bold]Found {len(patterns)} query patterns[/bold]")
+    
+    # Always show patterns if we have them
     if patterns:
-        console.print("[bold]Query Pattern Analysis[/bold]")
-        display_query_patterns(patterns)
+        console.print("\n[bold]Query Pattern Analysis[/bold]")
+        display_query_patterns(patterns, sort_by='duration', page_size=20)
+    else:
+        console.print("\n[yellow]No query patterns found[/yellow]")
     
     if analysis_result:
         console.print("\n[bold]DBT Model Coverage[/bold]")
@@ -480,7 +578,12 @@ def display_analysis_results(analysis_result, patterns, recommendations, achieve
 @cli.command()
 @click.option('--output', type=click.Path(), help='Output file path (JSON)')
 def export(output: Optional[str]):
-    """Export the latest analysis results"""
+    """Export the latest analysis results to a JSON file.
+    
+    If no output file is specified, prints the results to stdout. The export
+    includes query patterns, model coverage metrics, and uncovered tables from
+    the most recent analysis run.
+    """
     try:
         cache_manager = QueryLogsCacheManager()
         latest_result = cache_manager.get_latest_result()

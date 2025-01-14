@@ -1,23 +1,26 @@
-import time
-import hashlib
-try:
-    from clickhouse_driver import Client
-except ImportError:
-    raise ImportError("clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'")
-
-from datetime import datetime, timedelta
-import pandas as pd
-from typing import List, Dict, Any, Optional, Tuple, Union
-import re
-from .cache_manager import QueryLogsCacheManager
-from .models import QueryLog, QueryPattern, QueryType, QueryFocus
-from .sql_parser import extract_tables_from_query
 import logging
 import sys
+import hashlib
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+try:
+    from clickhouse_driver import Client
+except ImportError as exc:
+    raise ImportError(
+        "clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'"
+    ) from exc
+
+from .cache_manager import QueryLogsCacheManager
+from .models import QueryLog, QueryPattern, QueryKind, QueryFocus
+from .sql_parser import extract_tables_from_query
+import pandas as pd
+import re
 
 logger = logging.getLogger(__name__)
 
 class ClickHouseDataAcquisition:
+    """Handles data acquisition from ClickHouse database.
+    Provides methods to fetch and analyze query logs with various filtering options."""
     def __init__(self, host: str, port: int, user: str, password: str, database: str):
         """Initialize ClickHouse connection with optimized settings"""
         try:
@@ -47,14 +50,25 @@ class ClickHouseDataAcquisition:
         focus: QueryFocus = QueryFocus.ALL,
         include_users: Optional[List[str]] = None,
         exclude_users: Optional[List[str]] = None,
-        query_types: Optional[List[QueryType]] = None,
+        query_kinds: Optional[List[QueryKind]] = None,
         sample_size: float = 1.0,
         batch_size: int = 1000,
         use_cache: bool = True
     ) -> List[QueryLog]:
         """Fetch and process query logs from ClickHouse"""
         try:
-            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_types, sample_size)
+            logger.info("Starting query log collection with parameters:")
+            logger.info(f"  Days: {days}")
+            logger.info(f"  Focus: {focus}")
+            logger.info(f"  Include users: {include_users}")
+            logger.info(f"  Exclude users: {exclude_users}")
+            logger.info(f"  Query kinds: {query_kinds}")
+            logger.info(f"  Sample size: {sample_size}")
+            logger.info(f"  Batch size: {batch_size}")
+            logger.info(f"  Use cache: {use_cache}")
+            
+            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_kinds, sample_size)
+            logger.info(f"Generated cache key: {cache_key}")
             
             if use_cache and self.cache_manager.has_valid_cache(cache_key):
                 logger.info("Using cached query logs")
@@ -73,16 +87,16 @@ class ClickHouseDataAcquisition:
             
             # User filters
             if include_users:
-                conditions.append("user IN %(include_users)s")
-                params['include_users'] = tuple(include_users)
+                conditions.append("lower(user) IN %(include_users)s")
+                params['include_users'] = tuple(u.lower() for u in include_users)
             if exclude_users:
-                conditions.append("user NOT IN %(exclude_users)s")
-                params['exclude_users'] = tuple(exclude_users)
+                conditions.append("lower(user) NOT IN %(exclude_users)s")
+                params['exclude_users'] = tuple(u.lower() for u in exclude_users)
             
-            # Query type filter
-            if query_types:
-                conditions.append("type IN %(query_types)s")
-                params['query_types'] = tuple(qt.value for qt in query_types)
+            # Query kind filter
+            if query_kinds:
+                conditions.append("upper(query_kind) IN %(query_kinds)s")
+                params['query_kinds'] = tuple(qk.value.upper() for qk in query_kinds)
             
             # Build WHERE clause
             where_clause = " AND ".join(conditions) if conditions else "1"
@@ -91,12 +105,15 @@ class ClickHouseDataAcquisition:
             if focus == QueryFocus.SLOW:
                 where_clause += " AND query_duration_ms > 1000"  # Slow queries > 1s
             
-            # Build final query with sampling
+            logger.info(f"Building query with WHERE clause: {where_clause}")
+            logger.info(f"Parameters: {params}")
+            
+            # Build base query without LIMIT/OFFSET
             query = f"""
                 SELECT 
                     query_id,
                     query,
-                    type,
+                    query_kind,
                     user,
                     event_time as query_start_time,
                     query_duration_ms,
@@ -105,41 +122,57 @@ class ClickHouseDataAcquisition:
                     result_rows,
                     result_bytes,
                     memory_usage,
-                    cityHash64(normalizeQuery(query)) as normalized_query_hash
+                    cityHash64(normalizeQuery(query)) as normalized_query_hash,
+                    current_database,
+                    databases,
+                    tables,
+                    columns
                 FROM system.query_log
                 WHERE {where_clause}
                 ORDER BY event_time DESC
             """
             
+            logger.info("Starting batch processing...")
+            
             # Execute query in batches
             for offset in range(0, sys.maxsize, batch_size):
                 batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
-                batch_results = self.client.execute(batch_query, params)
+                logger.info(f"Executing batch with offset {offset}")
                 
-                if not batch_results:
-                    break
-                    
-                for row in batch_results:
-                    query_logs.append(QueryLog(
-                        query_id=row[0],
-                        query=row[1],
-                        type=row[2],
-                        user=row[3],
-                        query_start_time=row[4],
-                        query_duration_ms=row[5],
-                        read_rows=row[6],
-                        read_bytes=row[7],
-                        result_rows=row[8],
-                        result_bytes=row[9],
-                        memory_usage=row[10],
-                        normalized_query_hash=str(row[11])
-                    ))
-                
-                total_processed += len(batch_results)
-                logger.info(f"Processed {total_processed} query logs")
-                
-                if len(batch_results) < batch_size:
-                    break
+                try:
+                    batch_results = self.client.execute(batch_query, params)
+                    if not batch_results:
+                        logger.info(f"No more results at offset {offset}, stopping")
+                        break
+                        
+                    logger.info(f"Processing batch of {len(batch_results)} rows")
+                    for row in batch_results:
+                        query_logs.append(QueryLog(
+                            query_id=row[0],
+                            query=row[1],
+                            query_kind=row[2],
+                            user=row[3],
+                            query_start_time=row[4],
+                            query_duration_ms=row[5],
+                            read_rows=row[6],
+                            read_bytes=row[7],
+                            result_rows=row[8],
+                            result_bytes=row[9],
+                            memory_usage=row[10],
+                            normalized_query_hash=str(row[11]),
+                            current_database=row[12] or "",  # Handle NULL
+                            databases=row[13] or [],         # Handle NULL
+                            tables=row[14] or [],           # Handle NULL
+                            columns=row[15] or []           # Handle NULL
+                        ))
+                        total_processed += 1
+                except Exception as e:
+                    logger.error(f"Batch query failed at offset {offset}: {str(e)}")
+                    raise
+            
+            logger.info(f"Collected {total_processed} query logs from ClickHouse")
+            logger.info(f"Query conditions: {where_clause}")
+            logger.info(f"Parameters: {params}")
             
             if use_cache:
                 self.cache_manager.cache_data(cache_key, query_logs)

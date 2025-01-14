@@ -13,10 +13,11 @@ logger = setup_logger(__name__)
 class QueryLogsCacheManager:
     """Manages caching of query logs and analysis results"""
     
-    def __init__(self, cache_dir: str = ".cache"):
+    def __init__(self, cache_dir: str = ".cache", force_reset: bool = False):
         """Initialize cache manager with SQLite backend"""
         self.cache_dir = Path(os.getcwd())
         self.db_path = self.cache_dir / "cache.db"
+        self.force_reset = force_reset
         
         self._init_db()
         logger.info("Cache database initialized successfully")
@@ -33,6 +34,10 @@ class QueryLogsCacheManager:
 
     def _init_db(self):
         """Initialize SQLite database with required tables"""
+        if self.force_reset and self.db_path.exists():
+            os.remove(self.db_path)
+            logger.info("Cache database reset forced")
+        
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -47,12 +52,12 @@ class QueryLogsCacheManager:
                 )
             """)
             
-            # Query logs table
+            # Query logs table with new fields
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS query_logs (
                     query_id TEXT PRIMARY KEY,
                     query TEXT,
-                    type TEXT,
+                    query_kind TEXT,
                     user TEXT,
                     query_start_time TEXT,
                     query_duration_ms REAL,
@@ -62,10 +67,57 @@ class QueryLogsCacheManager:
                     result_bytes INTEGER,
                     memory_usage INTEGER,
                     normalized_query_hash TEXT,
+                    current_database TEXT,
+                    databases TEXT,  -- JSON array
+                    tables TEXT,     -- JSON array
+                    columns TEXT,    -- JSON array
                     cache_key TEXT,
                     timestamp REAL
                 )
             """)
+            
+            # Migrate existing data from type to query_kind if needed
+            try:
+                cursor.execute("SELECT * FROM query_logs LIMIT 1")
+                columns = [description[0] for description in cursor.description]
+                if 'type' in columns and 'query_kind' not in columns:
+                    logger.info("Migrating query_logs table from 'type' to 'query_kind'")
+                    # Create new column
+                    cursor.execute("ALTER TABLE query_logs ADD COLUMN query_kind TEXT")
+                    # Copy data
+                    cursor.execute("UPDATE query_logs SET query_kind = type")
+                    # Drop old column (SQLite doesn't support DROP COLUMN directly)
+                    cursor.execute("""
+                        CREATE TABLE query_logs_new (
+                            query_id TEXT PRIMARY KEY,
+                            query TEXT,
+                            query_kind TEXT,
+                            user TEXT,
+                            query_start_time TEXT,
+                            query_duration_ms REAL,
+                            read_rows INTEGER,
+                            read_bytes INTEGER,
+                            result_rows INTEGER,
+                            result_bytes INTEGER,
+                            memory_usage INTEGER,
+                            normalized_query_hash TEXT,
+                            cache_key TEXT,
+                            timestamp REAL
+                        )
+                    """)
+                    cursor.execute("""
+                        INSERT INTO query_logs_new 
+                        SELECT query_id, query, query_kind, user, query_start_time,
+                               query_duration_ms, read_rows, read_bytes, result_rows,
+                               result_bytes, memory_usage, normalized_query_hash,
+                               cache_key, timestamp
+                        FROM query_logs
+                    """)
+                    cursor.execute("DROP TABLE query_logs")
+                    cursor.execute("ALTER TABLE query_logs_new RENAME TO query_logs")
+            except sqlite3.OperationalError:
+                # Table doesn't exist yet, no migration needed
+                pass
             
             # Create index on query_start_time for efficient filtering
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_start_time ON query_logs(query_start_time)")
@@ -208,7 +260,7 @@ class QueryLogsCacheManager:
             
             # Create indexes for better query performance
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_user ON query_logs(user)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_type ON query_logs(type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_query_kind ON query_logs(query_kind)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_start_time ON query_logs(query_start_time)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_model ON query_patterns(model_name)")
             
@@ -247,38 +299,24 @@ class QueryLogsCacheManager:
             """)
             
     def _serialize_query_log(self, log: QueryLog) -> Dict:
-        """Serialize QueryLog to dictionary"""
-        return {
-            'query_id': log.query_id,
-            'query': log.query,
-            'type': log.type,
-            'user': log.user,
-            'query_start_time': log.query_start_time.isoformat() if log.query_start_time else None,
-            'query_duration_ms': log.query_duration_ms,
-            'read_rows': log.read_rows,
-            'read_bytes': log.read_bytes,
-            'result_rows': log.result_rows,
-            'result_bytes': log.result_bytes,
-            'memory_usage': log.memory_usage,
-            'normalized_query_hash': log.normalized_query_hash
-        }
-    
+        """Serialize QueryLog for database storage"""
+        data = log.to_dict()
+        # Convert lists to JSON strings
+        data['databases'] = json.dumps(data['databases'])
+        data['tables'] = json.dumps(data['tables'])
+        data['columns'] = json.dumps(data['columns'])
+        # Convert datetime to string if it's not already a string
+        if not isinstance(data['query_start_time'], str):
+            data['query_start_time'] = data['query_start_time'].isoformat()
+        return data
+
     def _deserialize_query_log(self, data: Dict) -> QueryLog:
-        """Deserialize dictionary to QueryLog"""
-        return QueryLog(
-            query_id=data['query_id'],
-            query=data['query'],
-            type=data['type'],
-            user=data['user'],
-            query_start_time=datetime.fromisoformat(data['query_start_time']) if data['query_start_time'] else None,
-            query_duration_ms=data['query_duration_ms'],
-            read_rows=data['read_rows'],
-            read_bytes=data['read_bytes'],
-            result_rows=data['result_rows'],
-            result_bytes=data['result_bytes'],
-            memory_usage=data['memory_usage'],
-            normalized_query_hash=data['normalized_query_hash']
-        )
+        """Deserialize QueryLog from database storage"""
+        # Convert JSON strings back to lists
+        data['databases'] = json.loads(data['databases']) if data['databases'] else []
+        data['tables'] = json.loads(data['tables']) if data['tables'] else []
+        data['columns'] = json.loads(data['columns']) if data['columns'] else []
+        return QueryLog.from_dict(data)
     
     def cache_query_logs(self, logs: List[QueryLog], cache_key: str, expiry: Optional[datetime] = None):
         """Cache query logs using direct SQL inserts"""
@@ -286,18 +324,22 @@ class QueryLogsCacheManager:
             cursor = conn.cursor()
             # Insert logs
             for log in logs:
+                serialized = self._serialize_query_log(log)
                 cursor.execute("""
                     INSERT OR REPLACE INTO query_logs (
-                        query_id, query, type, user, query_start_time,
+                        query_id, query, query_kind, user, query_start_time,
                         query_duration_ms, read_rows, read_bytes,
                         result_rows, result_bytes, memory_usage,
-                        normalized_query_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        normalized_query_hash, current_database, databases, tables, columns,
+                        cache_key, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    log.query_id, log.query, log.type, log.user,
-                    log.query_start_time.isoformat(), log.query_duration_ms,
-                    log.read_rows, log.read_bytes, log.result_rows,
-                    log.result_bytes, log.memory_usage, log.normalized_query_hash
+                    serialized['query_id'], serialized['query'], serialized['query_kind'], serialized['user'],
+                    serialized['query_start_time'], serialized['query_duration_ms'],
+                    serialized['read_rows'], serialized['read_bytes'], serialized['result_rows'],
+                    serialized['result_bytes'], serialized['memory_usage'], serialized['normalized_query_hash'],
+                    serialized['current_database'], serialized['databases'], serialized['tables'], serialized['columns'],
+                    cache_key, datetime.now().timestamp()
                 ))
             
             # Update cache metadata
@@ -332,7 +374,7 @@ class QueryLogsCacheManager:
             return [QueryLog(
                 query_id=row['query_id'],
                 query=row['query'],
-                type=row['type'],
+                query_kind=row['query_kind'],
                 user=row['user'],
                 query_start_time=datetime.fromisoformat(row['query_start_time']),
                 query_duration_ms=row['query_duration_ms'],
@@ -341,7 +383,11 @@ class QueryLogsCacheManager:
                 result_rows=row['result_rows'],
                 result_bytes=row['result_bytes'],
                 memory_usage=row['memory_usage'],
-                normalized_query_hash=row['normalized_query_hash']
+                normalized_query_hash=row['normalized_query_hash'],
+                current_database=row['current_database'],
+                databases=json.loads(row['databases']) if row['databases'] else [],
+                tables=json.loads(row['tables']) if row['tables'] else [],
+                columns=json.loads(row['columns']) if row['columns'] else []
             ) for row in rows]
 
     def has_valid_cache(self, cache_key: str) -> bool:
@@ -864,6 +910,14 @@ class QueryLogsCacheManager:
             
             return result
 
+    def _cache_legacy_data(self, cache_key: str, data: Any):
+        """Fallback method for old cache format"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO analysis_cache (cache_key, data, timestamp)
+                VALUES (?, ?, ?)
+            """, (cache_key, json.dumps(data), datetime.now().timestamp()))
     def _cache_legacy_data(self, cache_key: str, data: Any):
         """Fallback method for old cache format"""
         with sqlite3.connect(self.db_path) as conn:

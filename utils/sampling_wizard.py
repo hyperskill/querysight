@@ -10,6 +10,8 @@ class SamplingConfig:
     end_date: datetime
     user_include: Optional[List[str]]
     user_exclude: Optional[List[str]]
+    db_include: Optional[List[str]]
+    db_exclude: Optional[List[str]]
     query_focus: List[str]
     query_types: List[str]
 
@@ -19,6 +21,7 @@ class SamplingWizard:
             st.session_state.wizard_step = 1
         if 'sampling_config' not in st.session_state:
             st.session_state.sampling_config = None
+        self.total_steps = 6  # Increased from 5 to 6
 
     def _reset_wizard(self):
         st.session_state.wizard_step = 1
@@ -31,26 +34,24 @@ class SamplingWizard:
         st.session_state.wizard_step = max(1, st.session_state.wizard_step - 1)
 
     def render_wizard(self) -> Optional[SamplingConfig]:
-        """
-        Render the sampling configuration wizard
-        Returns SamplingConfig when complete, None while in progress
-        """
+        """Render the sampling configuration wizard"""
         st.markdown("### 📊 Sampling Configuration Wizard")
         
         # Progress bar
-        total_steps = 5
-        st.progress(st.session_state.wizard_step / total_steps)
+        st.progress(st.session_state.wizard_step / self.total_steps)
 
         if st.session_state.wizard_step == 1:
-            self._render_step_1()
+            self._render_step_1()  # Time Window
         elif st.session_state.wizard_step == 2:
-            self._render_step_2()
+            self._render_step_2()  # Sample Size
         elif st.session_state.wizard_step == 3:
-            self._render_step_3()
+            self._render_step_3()  # Query Types
         elif st.session_state.wizard_step == 4:
-            self._render_step_4()
+            self._render_step_4()  # User Filtering
         elif st.session_state.wizard_step == 5:
-            return self._render_step_5()  # Only step 5 returns the config
+            self._render_step_5()  # Database Filtering
+        elif st.session_state.wizard_step == 6:
+            return self._render_final_step()  # Performance Focus
         return None
 
     def _render_step_1(self) -> None:
@@ -194,54 +195,102 @@ class SamplingWizard:
                 st.session_state.user_exclude = exclude_users if exclude_users else None
                 self._next_step()
 
-    def _render_step_5(self) -> Optional[SamplingConfig]:
-        """Performance Focus"""
-        st.markdown("#### Step 5: Set Performance Focus 🎯")
+    def _render_step_5(self) -> None:
+        """Database Filtering Step"""
+        st.markdown("#### Step 5: Database Selection 🗄️")
         st.markdown("""
-        Choose performance aspects to focus on:
-        - Slow Queries: Find performance bottlenecks
-        - Frequent Queries: Identify common patterns
+        Filter queries by database:
+        - Select specific databases to analyze
+        - Leave empty to analyze all databases
+        - Useful for focusing on specific data domains
+        """)
+
+        database_filter = st.text_area(
+            "Database Filter",
+            placeholder="database1\ndatabase2\n-database3",
+            help="Enter database names (prefix with - to exclude)"
+        )
+
+        # Process database input
+        databases = [d.strip() for d in database_filter.split('\n') if d.strip()]
+        include_dbs = [d for d in databases if not d.startswith('-')]
+        exclude_dbs = [d[1:] for d in databases if d.startswith('-')]
+
+        # Show preview
+        col1, col2 = st.columns(2)
+        with col1:
+            if include_dbs:
+                st.markdown("**Including Databases:**")
+                for db in include_dbs:
+                    st.markdown(f"- {db}")
+        with col2:
+            if exclude_dbs:
+                st.markdown("**Excluding Databases:**")
+                for db in exclude_dbs:
+                    st.markdown(f"- {db}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back"):
+                self._prev_step()
+        with col2:
+            if st.button("Next →"):
+                st.session_state.db_include = include_dbs if include_dbs else None
+                st.session_state.db_exclude = exclude_dbs if exclude_dbs else None
+                self._next_step()
+
+    def _render_final_step(self) -> Optional[SamplingConfig]:
+        """Final Step (Performance Focus)"""
+        st.markdown("#### Step 6: Set Performance Focus 🎯")
+        st.markdown("""
+        Choose analysis focus:
         - All Queries: Complete analysis
+        - Slow Queries: Focus on performance issues
+        - Frequent Queries: Focus on high-impact patterns
         """)
 
         query_focus = st.multiselect(
             "Analysis Focus",
-            options=["Slow Queries", "Frequent Queries", "All Queries"],
-            default=["All Queries"],
-            help="Choose what types of queries to focus on"
+            options=["ALL", "SLOW", "FREQUENT"],
+            default=["ALL"],
+            help="Choose which types of queries to focus on"
         )
 
-        col1, col2, col3 = st.columns(3)
+        # Show summary of all configurations
+        st.markdown("### Configuration Summary")
+        st.json({
+            'Time Window': {
+                'Start': st.session_state.start_date.strftime('%Y-%m-%d'),
+                'End': st.session_state.end_date.strftime('%Y-%m-%d')
+            },
+            'Sample Size': f"{st.session_state.sample_size}%",
+            'Query Types': st.session_state.query_types,
+            'Users': {
+                'Include': st.session_state.user_include,
+                'Exclude': st.session_state.user_exclude
+            },
+            'Databases': {
+                'Include': st.session_state.db_include,
+                'Exclude': st.session_state.db_exclude
+            },
+            'Focus': query_focus
+        })
+
+        col1, col2 = st.columns(2)
         with col1:
             if st.button("← Back"):
                 self._prev_step()
-                return None
         with col2:
-            if st.button("Reset Wizard"):
-                self._reset_wizard()
-                return None
-        with col3:
-            if st.button("Finish"):
-                config = SamplingConfig(
-                    sample_size=st.session_state.sample_size / 100.0,  # Convert to fraction
-                    start_date=datetime.combine(st.session_state.start_date, datetime.min.time()),
-                    end_date=datetime.combine(st.session_state.end_date, datetime.max.time()),
+            if st.button("Start Analysis"):
+                return SamplingConfig(
+                    sample_size=st.session_state.sample_size,
+                    start_date=st.session_state.start_date,
+                    end_date=st.session_state.end_date,
                     user_include=st.session_state.user_include,
                     user_exclude=st.session_state.user_exclude,
+                    db_include=st.session_state.db_include,
+                    db_exclude=st.session_state.db_exclude,
                     query_focus=query_focus,
                     query_types=st.session_state.query_types
                 )
-                st.session_state.sampling_config = config  # Store in session state
-                return config
-
-        # Show Summary
-        st.markdown("### Configuration Summary")
-        st.markdown(f"""
-        - Time Window: {st.session_state.start_date} to {st.session_state.end_date}
-        - Sample Size: {st.session_state.sample_size}%
-        - Query Types: {', '.join(st.session_state.query_types)}
-        - Users: {len(st.session_state.user_include or [])} included, {len(st.session_state.user_exclude or [])} excluded
-        - Focus: {', '.join(query_focus)}
-        """)
-
         return None
