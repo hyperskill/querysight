@@ -338,7 +338,8 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
             port=Config.CLICKHOUSE_PORT,
             user=Config.CLICKHOUSE_USER,
             password=Config.CLICKHOUSE_PASSWORD,
-            database=Config.CLICKHOUSE_DATABASE
+            database=Config.CLICKHOUSE_DATABASE,
+            force_reset=force_reset
         )
         
         # Initialize dbt analyzer
@@ -483,7 +484,9 @@ def execute_pattern_analysis(components, query_logs, min_frequency, progress, ta
 def execute_dbt_integration(components, patterns, progress, task):
     """Execute DBT integration level"""
     try:
-        cache_key = f"level3_{hashlib.sha256(str(patterns).encode()).hexdigest()}_{Config.DBT_PROJECT_PATH}"
+        # Generate cache key based on pattern IDs to ensure consistent enrichment
+        pattern_ids = sorted([p.pattern_id for p in patterns])
+        cache_key = f"level3_{hashlib.sha256(','.join(pattern_ids).encode()).hexdigest()}_{Config.DBT_PROJECT_PATH}"
         
         if components.get('cache', True) and components['cache_manager'].has_valid_cache(cache_key):
             analysis_result = components['cache_manager'].get_cached_data(cache_key)
@@ -503,8 +506,21 @@ def execute_dbt_integration(components, patterns, progress, task):
         dbt_analyzer = components['dbt_analyzer']
         analysis_result = dbt_analyzer.analyze_project()
         
-        # Update analysis result with patterns and recalculate coverage
-        analysis_result.query_patterns = patterns
+        # Enrich patterns with historical data and DBT info
+        enriched_patterns = components['cache_manager'].enrich_patterns(patterns, cache_key)
+        
+        # For each pattern, try to map tables to DBT models
+        for pattern in enriched_patterns:
+            for table in pattern.tables_accessed:
+                model_name = dbt_analyzer.get_model_name(table)
+                if model_name:
+                    pattern.dbt_models_used.add(model_name)
+            
+            # Cache the updated pattern
+            components['cache_manager'].cache_pattern(pattern, cache_key)
+        
+        # Update analysis result with enriched patterns and recalculate coverage
+        analysis_result.query_patterns = enriched_patterns
         analysis_result.calculate_coverage()
         
         if components.get('cache', True):

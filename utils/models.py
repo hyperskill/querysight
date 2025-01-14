@@ -132,6 +132,27 @@ class QueryPattern:
         if hasattr(log, 'extracted_tables'):  # From SQL parser
             self.tables_accessed.update(log.extracted_tables)
 
+    def update_from_pattern(self, other: 'QueryPattern') -> None:
+        """Update pattern with data from another pattern while preserving history"""
+        if self.pattern_id != other.pattern_id:
+            raise ValueError("Cannot update from a different pattern ID")
+            
+        self.frequency += other.frequency
+        self.total_duration_ms += other.total_duration_ms
+        self.avg_duration_ms = self.total_duration_ms / self.frequency
+        self.users.update(other.users)
+        self.tables_accessed.update(other.tables_accessed)
+        self.dbt_models_used.update(other.dbt_models_used)
+        self.memory_usage += other.memory_usage
+        self.total_read_rows += other.total_read_rows
+        self.total_read_bytes += other.total_read_bytes
+
+        # Update timestamps
+        if not self.first_seen or (other.first_seen and other.first_seen < self.first_seen):
+            self.first_seen = other.first_seen
+        if not self.last_seen or (other.last_seen and other.last_seen > self.last_seen):
+            self.last_seen = other.last_seen
+
     @property
     def complexity_score(self) -> float:
         """Calculate complexity score based on pattern metrics"""
@@ -342,7 +363,7 @@ class AnalysisResult:
             "uncovered": (len(uncovered_models) / total_models * 100) if total_models > 0 else 0.0,
             "total_models": total_models,
             "used_models": sorted(list(used_models)),  # Sort for consistent output
-            "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output
+            "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output,
             "source_refs": sorted(list(self.dbt_mapper.source_refs.keys())) if self.dbt_mapper else []
         }
         

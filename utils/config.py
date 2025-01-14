@@ -10,6 +10,9 @@ logger.info("Loading environment variables")
 load_dotenv()
 
 class Config:
+    # Cache configuration
+    CACHE_DIR: str = os.getenv('CACHE_DIR', os.path.join(os.path.expanduser('~'), '.querysight', 'cache'))
+
     # ClickHouse configuration
     CLICKHOUSE_HOST: str = os.getenv('CLICKHOUSE_HOST', 'localhost')
     CLICKHOUSE_PORT: int = int(os.getenv('CLICKHOUSE_PORT', '9000'))
@@ -30,6 +33,7 @@ class Config:
         Validate the configuration and return a tuple of (is_valid, missing_vars)
         """
         required_vars = {
+            'CACHE_DIR': cls.CACHE_DIR,
             'CLICKHOUSE_HOST': cls.CLICKHOUSE_HOST,
             'CLICKHOUSE_USER': cls.CLICKHOUSE_USER,
             'CLICKHOUSE_PASSWORD': cls.CLICKHOUSE_PASSWORD,

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class ClickHouseDataAcquisition:
     """Handles data acquisition from ClickHouse database.
     Provides methods to fetch and analyze query logs with various filtering options."""
-    def __init__(self, host: str, port: int, user: str, password: str, database: str):
+    def __init__(self, host: str, port: int, user: str, password: str, database: str, force_reset: bool = False):
         """Initialize ClickHouse connection with optimized settings"""
         try:
             self.client = Client(
@@ -38,7 +38,7 @@ class ClickHouseDataAcquisition:
                     'connect_timeout': 10
                 }
             )
-            self.cache_manager = QueryLogsCacheManager()
+            self.cache_manager = QueryLogsCacheManager(force_reset=force_reset)
             logger.info("Successfully initialized ClickHouse connection")
         except Exception as e:
             logger.error(f"Failed to initialize ClickHouse connection: {str(e)}")
