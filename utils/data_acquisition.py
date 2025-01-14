@@ -1,24 +1,27 @@
-import time
+import logging
+import sys
+import hashlib
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
 try:
     from clickhouse_driver import Client
-except ImportError:
-    raise ImportError("clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'")
+except ImportError as exc:
+    raise ImportError(
+        "clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'"
+    ) from exc
 
-from datetime import datetime, timedelta
-try:
-    import pandas as pd
-except ImportError:
-    raise ImportError("pandas is required. Please install it using 'pip install pandas'")
-
-from typing import List, Dict, Any, Optional, Tuple, Union
-import re
 from .cache_manager import QueryLogsCacheManager
-import logging
+from .models import QueryLog, QueryPattern, QueryKind, QueryFocus
+from .sql_parser import extract_tables_from_query
+import pandas as pd
+import re
 
 logger = logging.getLogger(__name__)
 
 class ClickHouseDataAcquisition:
-    def __init__(self, host: str, port: int, user: str, password: str, database: str):
+    """Handles data acquisition from ClickHouse database.
+    Provides methods to fetch and analyze query logs with various filtering options."""
+    def __init__(self, host: str, port: int, user: str, password: str, database: str, force_reset: bool = False):
         """Initialize ClickHouse connection with optimized settings"""
         try:
             self.client = Client(
@@ -35,7 +38,7 @@ class ClickHouseDataAcquisition:
                     'connect_timeout': 10
                 }
             )
-            self.cache_manager = QueryLogsCacheManager()
+            self.cache_manager = QueryLogsCacheManager(force_reset=force_reset)
             logger.info("Successfully initialized ClickHouse connection")
         except Exception as e:
             logger.error(f"Failed to initialize ClickHouse connection: {str(e)}")
@@ -43,386 +46,196 @@ class ClickHouseDataAcquisition:
 
     def get_query_logs(
         self,
-        start_date: datetime,
-        end_date: datetime,
-        batch_size: int = 100,
-        sample_size: float = 0.1,
-        user_include: Optional[List[str]] = None,
-        user_exclude: Optional[List[str]] = None,
-        query_focus: Optional[List[str]] = None,
-        query_types: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Retrieve query logs from ClickHouse system.query_log table with advanced filtering
-        
-        Args:
-            start_date: Start date for log retrieval
-            end_date: End date for log retrieval
-            batch_size: Number of rows to retrieve per batch
-            sample_size: Fraction of data to sample (0.0 to 1.0)
-            user_include: List of usernames to include
-            user_exclude: List of usernames to exclude
-            query_focus: List of query focus options ("Slow Queries", "Frequent Queries", "All Queries")
-            query_types: List of query types to include ("SELECT", "INSERT", etc.)
-        
-        Returns:
-            Dict[str, Any]: Always returns a dictionary with at least these keys:
-                - status: 'error' | 'completed' | 'in_progress'
-                - data: List of query logs or empty list
-                - error: Optional error message
-        """
+        days: int = 7,
+        focus: QueryFocus = QueryFocus.ALL,
+        include_users: Optional[List[str]] = None,
+        exclude_users: Optional[List[str]] = None,
+        query_kinds: Optional[List[QueryKind]] = None,
+        sample_size: float = 1.0,
+        batch_size: int = 1000,
+        use_cache: bool = True
+    ) -> List[QueryLog]:
+        """Fetch and process query logs from ClickHouse"""
         try:
-            # Validate input parameters
-            if start_date > end_date:
-                return {
-                    'status': 'error',
-                    'data': [],
-                    'error': 'Start date must be before end date',
-                    'total_rows': 0,
-                    'loaded_rows': 0
-                }
-
-            logger.info(f"Starting query log retrieval with parameters: start_date={start_date}, end_date={end_date}, sample_size={sample_size}, user_include={user_include}, query_types={query_types}, query_focus={query_focus}")
+            logger.info("Starting query log collection with parameters:")
+            logger.info(f"  Days: {days}")
+            logger.info(f"  Focus: {focus}")
+            logger.info(f"  Include users: {include_users}")
+            logger.info(f"  Exclude users: {exclude_users}")
+            logger.info(f"  Query kinds: {query_kinds}")
+            logger.info(f"  Sample size: {sample_size}")
+            logger.info(f"  Batch size: {batch_size}")
+            logger.info(f"  Use cache: {use_cache}")
             
-            # Validate sample size
-            if not 0 < sample_size <= 1:
-                return {
-                    'status': 'error',
-                    'data': [],
-                    'error': 'Sample size must be between 0 and 1',
-                    'total_rows': 0,
-                    'loaded_rows': 0
-                }
-                
-            # Try to get data from cache first
-            cached_df = self.cache_manager.get_cached_data(start_date, end_date)
-            if cached_df is not None:
-                # Apply sampling to cached data
-                if sample_size < 1.0:
-                    cached_df = cached_df.sample(frac=sample_size, random_state=42)
-                return {
-                    'status': 'completed',
-                    'data': cached_df.to_dict('records'),
-                    'total_rows': len(cached_df),
-                    'loaded_rows': len(cached_df),
-                    'sampling_rate': sample_size
-                }
-
-            # Build the WHERE clause dynamically
-            where_clauses = [
-                "query_start_time BETWEEN %(start_date)s AND %(end_date)s",
-                "type = 'QueryStart'",
-                "query NOT LIKE '%%system.query_log%%'",
-                "query NOT LIKE '%%SELECT 1%%'"
-            ]
+            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_kinds, sample_size)
+            logger.info(f"Generated cache key: {cache_key}")
             
-            params = {
-                'start_date': start_date,
-                'end_date': end_date,
-                'min_duration': 1000,  # Default for slow queries
-                'min_frequency': 10    # Default for frequent queries
-            }
+            if use_cache and self.cache_manager.has_valid_cache(cache_key):
+                logger.info("Using cached query logs")
+                return self.cache_manager.get_cached_data(cache_key)
             
-            logger.debug(f"Initial params: {params}")
+            query_logs = []
+            total_processed = 0
             
-            # Add user filters
-            if user_include:
-                placeholders = [f"%(user_include_{i})s" for i in range(len(user_include))]
-                where_clauses.append(f"user IN ({','.join(placeholders)})")
-                for i, user in enumerate(user_include):
-                    params[f'user_include_{i}'] = user
-                logger.debug(f"Added user include filters: {params}")
-
-            if user_exclude:
-                placeholders = [f"%(user_exclude_{i})s" for i in range(len(user_exclude))]
-                where_clauses.append(f"user NOT IN ({','.join(placeholders)})")
-                for i, user in enumerate(user_exclude):
-                    params[f'user_exclude_{i}'] = user
-                logger.debug(f"Added user exclude filters: {params}")
-                
-            # Add query type filters
-            if query_types and 'All' not in query_types:
-                type_conditions = []
-                for i, qtype in enumerate(query_types):
-                    param_name = f'query_type_{i}'
-                    type_conditions.append(f"query ILIKE %(query_type_{i})s")
-                    params[param_name] = f'%%{qtype}%%'
-                where_clauses.append(f"({' OR '.join(type_conditions)})")
-                logger.debug(f"Added query type filters: {params}")
-                
-            # Add performance filters
-            if query_focus and 'All Queries' not in query_focus:
-                if 'Slow Queries' in query_focus:
-                    where_clauses.append("query_duration_ms > %(min_duration)s")
-                    params['min_duration'] = 1000  # Override default for slow queries
-                if 'Frequent Queries' in query_focus:
-                    # This requires a subquery to count query occurrences
-                    where_clauses.append("""
-                        normalized_query_hash IN (
-                            SELECT normalized_query_hash 
-                            FROM system.query_log 
-                            WHERE query_start_time BETWEEN %(start_date)s AND %(end_date)s
-                            GROUP BY normalized_query_hash 
-                            HAVING count() > %(min_frequency)s
-                        )
-                    """)
-                    params['min_frequency'] = 10  # Override default for frequent queries
-                logger.debug(f"Added performance filters: {params}")
+            # Build query conditions
+            conditions = []
+            params = {}
             
-            # Apply sampling at the application level instead of using SAMPLE clause
-            limit_with_sampling = int(batch_size / sample_size) if sample_size < 1.0 else batch_size
-            params['limit'] = limit_with_sampling
-            params['offset'] = 0
+            # Time range condition
+            conditions.append("event_time >= %(start_time)s")
+            params['start_time'] = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
             
+            # User filters
+            if include_users:
+                conditions.append("lower(user) IN %(include_users)s")
+                params['include_users'] = tuple(u.lower() for u in include_users)
+            if exclude_users:
+                conditions.append("lower(user) NOT IN %(exclude_users)s")
+                params['exclude_users'] = tuple(u.lower() for u in exclude_users)
+            
+            # Query kind filter
+            if query_kinds:
+                conditions.append("upper(query_kind) IN %(query_kinds)s")
+                params['query_kinds'] = tuple(qk.value.upper() for qk in query_kinds)
+            
+            # Build WHERE clause
+            where_clause = " AND ".join(conditions) if conditions else "1"
+            
+            # Add focus-specific conditions
+            if focus == QueryFocus.SLOW:
+                where_clause += " AND query_duration_ms > 1000"  # Slow queries > 1s
+            
+            logger.info(f"Building query with WHERE clause: {where_clause}")
+            logger.info(f"Parameters: {params}")
+            
+            # Build base query without LIMIT/OFFSET
             query = f"""
-            SELECT
-                query_id,
-                query,
-                type,
-                user,
-                query_start_time,
-                query_duration_ms,
-                read_rows,
-                read_bytes,
-                result_rows,
-                result_bytes,
-                memory_usage,
-                normalized_query_hash
-            FROM system.query_log
-            WHERE {' AND '.join(where_clauses)}
-            ORDER BY query_start_time DESC
-            LIMIT %(limit)s
-            OFFSET %(offset)s
+                SELECT 
+                    query_id,
+                    query,
+                    query_kind,
+                    user,
+                    event_time as query_start_time,
+                    query_duration_ms,
+                    read_rows,
+                    read_bytes,
+                    result_rows,
+                    result_bytes,
+                    memory_usage,
+                    cityHash64(normalizeQuery(query)) as normalized_query_hash,
+                    current_database,
+                    databases,
+                    tables,
+                    columns
+                FROM system.query_log
+                WHERE {where_clause}
+                ORDER BY event_time DESC
             """
             
-            try:
-                offset = 0
-                all_rows = []
-                total_count_query = f"""
-                    SELECT count(*)
-                    FROM system.query_log
-                    WHERE {' AND '.join(where_clauses)}
-                """
-                
-                # Get total count first
-                try:
-                    total_count = self.client.execute(total_count_query, params)[0][0]
-                    logger.debug(f"Total count: {total_count}")
-                    
-                    # If no rows found, return early
-                    if total_count == 0:
-                        return {
-                            'status': 'completed',
-                            'data': [],
-                            'total_rows': 0,
-                            'loaded_rows': 0
-                        }
-                except Exception as e:
-                    logger.error(f"Failed to get total count: {str(e)}")
-                    return {
-                        'status': 'error',
-                        'data': [],
-                        'error': f"Failed to get total count: {str(e)}",
-                        'total_rows': 0,
-                        'loaded_rows': 0
-                    }
-                
-                while offset < total_count:
-                    try:
-                        batch_params = {
-                            **params,
-                            'limit': limit_with_sampling,
-                            'offset': offset
-                        }
-                        
-                        logger.debug(f"Executing batch with parameters: {batch_params}")
-                        # Add retry logic and optimized settings
-                        max_retries = 3
-                        retry_count = 0
-                        result = None
-                        
-                        while retry_count < max_retries:
-                            try:
-                                result = self.client.execute(
-                                    query,
-                                    batch_params,
-                                    settings={
-                                        'use_numpy': True,
-                                        'types_check': True,
-                                        'max_memory_usage': 10000000000,
-                                        'timeout_before_checking_execution_speed': 1000
-                                    },
-                                    with_column_types=True
-                                )
-                                logger.debug(f"Successfully executed batch query, got {len(result[0])} rows")
-                                break
-                            except Exception as e:
-                                logger.error(f"Retry {retry_count + 1} failed: {str(e)}")
-                                logger.error(f"Failed query: {query}")
-                                retry_count += 1
-                                if retry_count == max_retries:
-                                    if len(all_rows) > 0:
-                                        # If we have some data, return it with error status
-                                        return {
-                                            'status': 'error',
-                                            'data': all_rows,
-                                            'error': f"Failed to execute query after {max_retries} retries: {str(e)}",
-                                            'total_rows': total_count,
-                                            'loaded_rows': len(all_rows)
-                                        }
-                                    else:
-                                        # If we have no data, return empty result with error
-                                        return {
-                                            'status': 'error',
-                                            'data': [],
-                                            'error': f"Failed to execute query after {max_retries} retries: {str(e)}",
-                                            'total_rows': 0,
-                                            'loaded_rows': 0
-                                        }
-                                time.sleep(1)
-                        
-                        if result is None:
-                            if len(all_rows) > 0:
-                                # If we have some data, return it with error status
-                                return {
-                                    'status': 'error',
-                                    'data': all_rows,
-                                    'error': "Failed to execute query after retries",
-                                    'total_rows': total_count,
-                                    'loaded_rows': len(all_rows)
-                                }
-                            else:
-                                # If we have no data, return empty result with error
-                                return {
-                                    'status': 'error',
-                                    'data': [],
-                                    'error': "Failed to execute query after retries",
-                                    'total_rows': 0,
-                                    'loaded_rows': 0
-                                }
-                        
-                        rows, columns = result
-                        batch_rows = []
-                        for row in rows:
-                            processed_row = {
-                                'query_id': row[0],
-                                'query': row[1],
-                                'type': str(row[2]),
-                                'user': row[3],
-                                'query_start_time': row[4],
-                                'query_duration_ms': float(row[5]),
-                                'read_rows': int(row[6]),
-                                'read_bytes': int(row[7]),
-                                'result_rows': int(row[8]),
-                                'result_bytes': int(row[9]),
-                                'memory_usage': int(row[10]),
-                                'normalized_query_hash': row[11]
-                            }
-                            batch_rows.append(processed_row)
-                        
-                        # Apply sampling at application level
-                        if sample_size < 1.0:
-                            import random
-                            random.seed(42)  # For reproducibility
-                            batch_rows = random.sample(batch_rows, int(len(batch_rows) * sample_size))
-                        
-                        all_rows.extend(batch_rows)
-                        offset += batch_size
-                        
-                        if len(batch_rows) > 0:
-                            try:
-                                # Update cache with the current batch
-                                batch_df = pd.DataFrame(batch_rows)
-                                self.cache_manager.update_cache(batch_df, start_date, end_date)
-                                logger.info(f"Successfully cached batch with {len(batch_rows)} rows")
-                            except Exception as cache_error:
-                                logger.error(f"Failed to update cache: {str(cache_error)}")
-                                # Continue processing even if cache update fails
-                        
-                        # Only return if we have a significant batch or reached the end
-                        if len(all_rows) >= batch_size or offset >= total_count:
-                            return {
-                                'status': 'in_progress' if offset < total_count else 'completed',
-                                'data': all_rows,
-                                'total_rows': total_count,
-                                'loaded_rows': len(all_rows)
-                            }
-                        
-                    except Exception as batch_error:
-                        logger.error(f"Error processing batch at offset {offset}: {str(batch_error)}")
-                        # Skip problematic batch and continue with next one
-                        offset += batch_size
-                
-            except Exception as e:
-                error_msg = f"Failed to retrieve query logs: {str(e)}"
-                logger.error(error_msg)
-                return {
-                    'status': 'error',
-                    'data': [],
-                    'error': error_msg,
-                    'total_rows': 0,
-                    'loaded_rows': 0
-                }
-
-        except Exception as e:
-            error_msg = f"Unexpected error in get_query_logs: {str(e)}"
-            logger.error(error_msg)
-            return {
-                'status': 'error',
-                'data': [],
-                'error': error_msg,
-                'total_rows': 0,
-                'loaded_rows': 0
-            }
-
-    def analyze_query_patterns(self, query_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Analyze query patterns from the logs
-        """
-        patterns = {}
-        
-        def normalize_query(query: str) -> str:
-            # Remove literals
-            query = re.sub(r"'[^']*'", "'?'", query)
-            query = re.sub(r"\d+", "?", query)
-            # Extract model name if present
-            model_match = re.search(r'FROM\s+([a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)', query, re.IGNORECASE)
-            model_name = model_match.group(2) if model_match else 'Unknown'
-            # Remove whitespace
-            query = " ".join(query.split())
-            return query, model_name
-
-        for log in query_logs:
-            query = log['query']
-            normalized_query, model_name = normalize_query(query)
+            logger.info("Starting batch processing...")
             
-            if normalized_query in patterns:
-                patterns[normalized_query]['frequency'] += 1
-                patterns[normalized_query]['total_duration'] += log['query_duration_ms']
-                if log['query_duration_ms'] > patterns[normalized_query]['max_duration']:
-                    patterns[normalized_query]['max_duration'] = log['query_duration_ms']
-                patterns[normalized_query]['total_read_rows'] += log['read_rows']
-                patterns[normalized_query]['total_read_bytes'] += log['read_bytes']
-            else:
-                patterns[normalized_query] = {
-                    'pattern': normalized_query,
-                    'model_name': model_name,
-                    'frequency': 1,
-                    'total_duration': log['query_duration_ms'],
-                    'max_duration': log['query_duration_ms'],
-                    'total_read_rows': log['read_rows'],
-                    'total_read_bytes': log['read_bytes']
-                }
+            # Execute query in batches
+            for offset in range(0, sys.maxsize, batch_size):
+                batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
+                logger.info(f"Executing batch with offset {offset}")
+                
+                try:
+                    batch_results = self.client.execute(batch_query, params)
+                    if not batch_results:
+                        logger.info(f"No more results at offset {offset}, stopping")
+                        break
+                        
+                    logger.info(f"Processing batch of {len(batch_results)} rows")
+                    for row in batch_results:
+                        query_logs.append(QueryLog(
+                            query_id=row[0],
+                            query=row[1],
+                            query_kind=row[2],
+                            user=row[3],
+                            query_start_time=row[4],
+                            query_duration_ms=row[5],
+                            read_rows=row[6],
+                            read_bytes=row[7],
+                            result_rows=row[8],
+                            result_bytes=row[9],
+                            memory_usage=row[10],
+                            normalized_query_hash=str(row[11]),
+                            current_database=row[12] or "",  # Handle NULL
+                            databases=row[13] or [],         # Handle NULL
+                            tables=row[14] or [],           # Handle NULL
+                            columns=row[15] or []           # Handle NULL
+                        ))
+                        total_processed += 1
+                except Exception as e:
+                    logger.error(f"Batch query failed at offset {offset}: {str(e)}")
+                    raise
+            
+            logger.info(f"Collected {total_processed} query logs from ClickHouse")
+            logger.info(f"Query conditions: {where_clause}")
+            logger.info(f"Parameters: {params}")
+            
+            if use_cache:
+                self.cache_manager.cache_data(cache_key, query_logs)
+                logger.info("Cached query logs")
+            
+            return query_logs
+            
+        except Exception as e:
+            logger.error(f"Error fetching query logs: {str(e)}")
+            raise
 
-        # Convert to list and calculate averages
-        result = []
-        for pattern in patterns.values():
-            pattern['avg_duration'] = pattern['total_duration'] / pattern['frequency'] / 1000  # Convert to seconds
-            pattern['max_duration'] = pattern['max_duration'] / 1000  # Convert to seconds
-            pattern['avg_read_rows'] = pattern['total_read_rows'] / pattern['frequency']
-            pattern['avg_read_bytes'] = pattern['total_read_bytes'] / pattern['frequency']
-            result.append(pattern)
-        
-        # Sort by frequency and duration
-        result.sort(key=lambda x: (-x['frequency'], -x['avg_duration']))
-        return result
+    def analyze_query_patterns(
+        self,
+        query_logs: List[QueryLog],
+        min_frequency: int = 2
+    ) -> List[QueryPattern]:
+        """Analyze query logs to identify patterns"""
+        try:
+            # Group queries by normalized hash
+            patterns: Dict[str, QueryPattern] = {}
+            
+            for log in query_logs:
+                pattern_id = log.normalized_query_hash
+                
+                if pattern_id not in patterns:
+                    # Extract table references
+                    tables = extract_tables_from_query(log.query)
+                    
+                    patterns[pattern_id] = QueryPattern(
+                        pattern_id=pattern_id,
+                        sql_pattern=log.query,
+                        model_name=None,  
+                        tables_accessed=tables
+                    )
+                
+                # Update pattern metrics
+                patterns[pattern_id].update_from_log(log)
+            
+            # Filter by minimum frequency
+            frequent_patterns = [
+                pattern for pattern in patterns.values()
+                if pattern.frequency >= min_frequency
+            ]
+            
+            # Sort by impact (frequency * avg duration)
+            return sorted(
+                frequent_patterns,
+                key=lambda p: p.frequency * p.avg_duration_ms,
+                reverse=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Error analyzing query patterns: {str(e)}")
+            raise
+
+    def _generate_cache_key(self, *args) -> str:
+        """Generate cache key from query parameters"""
+        key_parts = [str(arg) for arg in args if arg is not None]
+        return hashlib.md5('_'.join(key_parts).encode()).hexdigest()
+
+    def test_connection(self) -> None:
+        """Test the connection to ClickHouse"""
+        try:
+            self.client.execute("SELECT 1")
+        except Exception as e:
+            raise Exception(f"Failed to connect to ClickHouse: {str(e)}")
