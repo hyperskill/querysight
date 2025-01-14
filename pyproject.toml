@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "querysight"
+version = "0.1.0"
+description = "QuerySight: ClickHouse Log-Driven dbt Project Enhancer"
+requires-python = ">=3.11"
+dependencies = [
+    "clickhouse-driver>=0.2.9",
+    "openai>=1.57.4",
+    "python-dotenv>=1.0.1",
+    "pyyaml>=6.0.2",
+    "sqlparse>=0.4.4",
+    "rich>=13.7.0",
+    "click>=8.1.7",
+    "pandas>=2.2.3",
+    "reportlab>=4.2.5"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.4",
+    "pypdf>=5.1.0"
+]
+
+[project.scripts]
+querysight = "cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["utils*"]
+exclude = ["test*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"

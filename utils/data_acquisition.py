@@ -1,90 +1,241 @@
-import clickhouse_driver
-from typing import List, Dict
 import logging
-import time
+import sys
+import hashlib
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+try:
+    from clickhouse_driver import Client
+except ImportError as exc:
+    raise ImportError(
+        "clickhouse-driver is required. Please install it using 'pip install clickhouse-driver'"
+    ) from exc
+
+from .cache_manager import QueryLogsCacheManager
+from .models import QueryLog, QueryPattern, QueryKind, QueryFocus
+from .sql_parser import extract_tables_from_query
+import pandas as pd
+import re
 
 logger = logging.getLogger(__name__)
 
 class ClickHouseDataAcquisition:
-    def __init__(self, host, port, username, password):
-        logger.info(f"Initializing ClickHouseDataAcquisition with host: {host}, port: {port}, username: {username}")
+    """Handles data acquisition from ClickHouse database.
+    Provides methods to fetch and analyze query logs with various filtering options."""
+    def __init__(self, host: str, port: int, user: str, password: str, database: str, force_reset: bool = False):
+        """Initialize ClickHouse connection with optimized settings"""
         try:
-            self.client = clickhouse_driver.Client(
+            self.client = Client(
                 host=host,
                 port=port,
-                user=username,
+                user=user,
                 password=password,
+                database=database,
                 settings={
-                    'max_execution_time': 300,  # 5 minutes timeout
-                    'timeout_before_checking_execution_speed': 15
-                },
-                connect_timeout=5
+                    'max_execution_time': 30,  # 30 seconds timeout
+                    'max_threads': 2,  # Limit thread usage
+                    'use_uncompressed_cache': 1,
+                    'max_block_size': 100000,
+                    'connect_timeout': 10
+                }
             )
-            logger.info("ClickHouse connection successfully established")
+            self.cache_manager = QueryLogsCacheManager(force_reset=force_reset)
+            logger.info("Successfully initialized ClickHouse connection")
         except Exception as e:
-            logger.error(f"Error connecting to ClickHouse: {str(e)}")
+            logger.error(f"Failed to initialize ClickHouse connection: {str(e)}")
             raise
 
-    def retrieve_query_logs(self, start_date, end_date):
-        logger.info(f"Retrieving query logs from {start_date} to {end_date}")
-        query = f"""
-            SELECT *
-            FROM system.query_log
-            WHERE event_time BETWEEN '{start_date}' AND '{end_date}'
-            LIMIT 1000  -- Add a limit to prevent retrieving too much data
-        """
-        logger.debug(f"Executing query: {query}")
+    def get_query_logs(
+        self,
+        days: int = 7,
+        focus: QueryFocus = QueryFocus.ALL,
+        include_users: Optional[List[str]] = None,
+        exclude_users: Optional[List[str]] = None,
+        query_kinds: Optional[List[QueryKind]] = None,
+        sample_size: float = 1.0,
+        batch_size: int = 1000,
+        use_cache: bool = True
+    ) -> List[QueryLog]:
+        """Fetch and process query logs from ClickHouse"""
         try:
-            start_time = time.time()
-            result = self.client.execute(query)
-            end_time = time.time()
-            logger.info(f"Query executed successfully in {end_time - start_time:.2f} seconds, {len(result)} rows retrieved")
-            return result
+            logger.info("Starting query log collection with parameters:")
+            logger.info(f"  Days: {days}")
+            logger.info(f"  Focus: {focus}")
+            logger.info(f"  Include users: {include_users}")
+            logger.info(f"  Exclude users: {exclude_users}")
+            logger.info(f"  Query kinds: {query_kinds}")
+            logger.info(f"  Sample size: {sample_size}")
+            logger.info(f"  Batch size: {batch_size}")
+            logger.info(f"  Use cache: {use_cache}")
+            
+            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_kinds, sample_size)
+            logger.info(f"Generated cache key: {cache_key}")
+            
+            if use_cache and self.cache_manager.has_valid_cache(cache_key):
+                logger.info("Using cached query logs")
+                return self.cache_manager.get_cached_data(cache_key)
+            
+            query_logs = []
+            total_processed = 0
+            
+            # Build query conditions
+            conditions = []
+            params = {}
+            
+            # Time range condition
+            conditions.append("event_time >= %(start_time)s")
+            params['start_time'] = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            
+            # User filters
+            if include_users:
+                conditions.append("lower(user) IN %(include_users)s")
+                params['include_users'] = tuple(u.lower() for u in include_users)
+            if exclude_users:
+                conditions.append("lower(user) NOT IN %(exclude_users)s")
+                params['exclude_users'] = tuple(u.lower() for u in exclude_users)
+            
+            # Query kind filter
+            if query_kinds:
+                conditions.append("upper(query_kind) IN %(query_kinds)s")
+                params['query_kinds'] = tuple(qk.value.upper() for qk in query_kinds)
+            
+            # Build WHERE clause
+            where_clause = " AND ".join(conditions) if conditions else "1"
+            
+            # Add focus-specific conditions
+            if focus == QueryFocus.SLOW:
+                where_clause += " AND query_duration_ms > 1000"  # Slow queries > 1s
+            
+            logger.info(f"Building query with WHERE clause: {where_clause}")
+            logger.info(f"Parameters: {params}")
+            
+            # Build base query without LIMIT/OFFSET
+            query = f"""
+                SELECT 
+                    query_id,
+                    query,
+                    query_kind,
+                    user,
+                    event_time as query_start_time,
+                    query_duration_ms,
+                    read_rows,
+                    read_bytes,
+                    result_rows,
+                    result_bytes,
+                    memory_usage,
+                    cityHash64(normalizeQuery(query)) as normalized_query_hash,
+                    current_database,
+                    databases,
+                    tables,
+                    columns
+                FROM system.query_log
+                WHERE {where_clause}
+                ORDER BY event_time DESC
+            """
+            
+            logger.info("Starting batch processing...")
+            
+            # Execute query in batches
+            for offset in range(0, sys.maxsize, batch_size):
+                batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
+                logger.info(f"Executing batch with offset {offset}")
+                
+                try:
+                    batch_results = self.client.execute(batch_query, params)
+                    if not batch_results:
+                        logger.info(f"No more results at offset {offset}, stopping")
+                        break
+                        
+                    logger.info(f"Processing batch of {len(batch_results)} rows")
+                    for row in batch_results:
+                        query_logs.append(QueryLog(
+                            query_id=row[0],
+                            query=row[1],
+                            query_kind=row[2],
+                            user=row[3],
+                            query_start_time=row[4],
+                            query_duration_ms=row[5],
+                            read_rows=row[6],
+                            read_bytes=row[7],
+                            result_rows=row[8],
+                            result_bytes=row[9],
+                            memory_usage=row[10],
+                            normalized_query_hash=str(row[11]),
+                            current_database=row[12] or "",  # Handle NULL
+                            databases=row[13] or [],         # Handle NULL
+                            tables=row[14] or [],           # Handle NULL
+                            columns=row[15] or []           # Handle NULL
+                        ))
+                        total_processed += 1
+                except Exception as e:
+                    logger.error(f"Batch query failed at offset {offset}: {str(e)}")
+                    raise
+            
+            logger.info(f"Collected {total_processed} query logs from ClickHouse")
+            logger.info(f"Query conditions: {where_clause}")
+            logger.info(f"Parameters: {params}")
+            
+            if use_cache:
+                self.cache_manager.cache_data(cache_key, query_logs)
+                logger.info("Cached query logs")
+            
+            return query_logs
+            
         except Exception as e:
-            logger.error(f"Error executing query: {str(e)}")
+            logger.error(f"Error fetching query logs: {str(e)}")
             raise
 
-    def preprocess_query_data(self, query_data):
-        logger.info(f"Starting preprocessing of {len(query_data)} query logs")
-        start_time = time.time()
-        preprocessed_data = []
-        for i, row in enumerate(query_data):
-            if i % 100 == 0:  # Log progress every 100 rows
-                logger.info(f"Preprocessed {i} rows")
-            # Clean and standardize query
-            query_text = row['query']
-            query_text = query_text.lower()  # Convert to lowercase
-            query_text = query_text.replace('\n', ' ')  # Remove newlines
+    def analyze_query_patterns(
+        self,
+        query_logs: List[QueryLog],
+        min_frequency: int = 2
+    ) -> List[QueryPattern]:
+        """Analyze query logs to identify patterns"""
+        try:
+            # Group queries by normalized hash
+            patterns: Dict[str, QueryPattern] = {}
+            
+            for log in query_logs:
+                pattern_id = log.normalized_query_hash
+                
+                if pattern_id not in patterns:
+                    # Extract table references
+                    tables = extract_tables_from_query(log.query)
+                    
+                    patterns[pattern_id] = QueryPattern(
+                        pattern_id=pattern_id,
+                        sql_pattern=log.query,
+                        model_name=None,  
+                        tables_accessed=tables
+                    )
+                
+                # Update pattern metrics
+                patterns[pattern_id].update_from_log(log)
+            
+            # Filter by minimum frequency
+            frequent_patterns = [
+                pattern for pattern in patterns.values()
+                if pattern.frequency >= min_frequency
+            ]
+            
+            # Sort by impact (frequency * avg duration)
+            return sorted(
+                frequent_patterns,
+                key=lambda p: p.frequency * p.avg_duration_ms,
+                reverse=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Error analyzing query patterns: {str(e)}")
+            raise
 
-            # Tokenize query
-            tokens = query_text.split(' ')
+    def _generate_cache_key(self, *args) -> str:
+        """Generate cache key from query parameters"""
+        key_parts = [str(arg) for arg in args if arg is not None]
+        return hashlib.md5('_'.join(key_parts).encode()).hexdigest()
 
-            # Append preprocessed data
-            preprocessed_data.append(tokens)
-
-        end_time = time.time()
-        logger.info(f"Preprocessing completed in {end_time - start_time:.2f} seconds")
-        return preprocessed_data
-
-    def analyze_queries(self, preprocessed_data: List[List[str]]) -> Dict:
-        logger.info(f"Starting analysis of {len(preprocessed_data)} preprocessed queries")
-        analysis = {
-            'tables': {},
-            'columns': {},
-            'joins': [],
-            'aggregations': [],
-            'filters': []
-        }
-        
-        for tokens in preprocessed_data:
-            # Implement logic to populate the analysis dictionary
-            # This is a simplified example: 
-            for i, token in enumerate(tokens):
-                if token == 'from' and i + 1 < len(tokens):
-                    analysis['tables'][tokens[i+1]] = analysis['tables'].get(tokens[i+1], 0) + 1
-                elif token == 'join' and i + 1 < len(tokens):
-                    analysis['joins'].append(tokens[i+1])
-                # Add more analysis logic here
-
-        logger.info("Query analysis completed")
-        return analysis
+    def test_connection(self) -> None:
+        """Test the connection to ClickHouse"""
+        try:
+            self.client.execute("SELECT 1")
+        except Exception as e:
+            raise Exception(f"Failed to connect to ClickHouse: {str(e)}")

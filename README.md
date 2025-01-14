@@ -1,89 +1,122 @@
 # QuerySight: ClickHouse Log-Driven dbt Project Enhancer
-# [WORK IN PROGRESS]
 
-This project analyzes ClickHouse query logs and dbt project structure to suggest improvements for optimizing the most common queries and data patterns.
+QuerySight is a powerful command-line tool that analyzes ClickHouse query patterns and provides intelligent optimization recommendations for dbt projects. The code presented in this repository is work-in-progress, presented as is and is not intended for production use yet.
 
-## Project Structure
+## Features
 
-The project consists of the following main components:
+- 🔍 Analyze ClickHouse query logs for patterns and performance insights
+- 📊 Generate detailed query pattern analysis with frequency, duration, and memory metrics
+- 🎯 Map queries to dbt models for comprehensive coverage analysis
+- 🤖 AI-powered optimization recommendations using OpenAI
+- 💾 Intelligent caching system for faster repeated analysis
+- 🔄 Export analysis results in JSON format
 
-- `main.py`: The main script that combines all components and runs the analysis process.
-- `utils/data_acquisition.py`: Module for retrieving and preprocessing query logs from ClickHouse.
-- `utils/dbt_analyzer.py`: Module for analyzing the dbt project structure.
-- `utils/ai_suggester.py`: Module for generating improvement suggestions using the OpenAI API.
+## Prerequisites
 
-## Requirements
-
-- Python 3.7+
-- clickhouse-driver
-- PyYAML
-- openai
-- streamlit (optional, in case of using web interface)
+- Python 3.11+
+- ClickHouse database instance
+- OpenAI API key
+- dbt project
 
 ## Installation
 
-1. Clone the repository:  
-  git clone https://github.com/yourusername/clickhouse-dbt-optimizer.git  
-  cd clickhouse-dbt-optimizer  
+1. Clone the repository:
+```bash
+git clone https://github.com/codeium/querysight.git
+cd querysight
+```
 
-2. Install dependencies:  
-  `pip install -r requirements.txt`
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Configuration
+
+1. Set up environment variables in `.env` file:
+```bash
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PORT=9000
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=your_password
+CLICKHOUSE_DATABASE=default
+OPENAI_API_KEY=your_openai_key
+DBT_PROJECT_PATH=/path/to/dbt/project  # Optional
+```
+
+2. Or copy and modify the example file:
+```bash
+cp .env.example .env
+```
 
 ## Usage
 
-### Console interface
+QuerySight provides two main commands:
 
-Run the `main.py` script with the necessary arguments:  
-  `python main.py --dbt-project /path/to/dbt/project --start-date 2023-01-01 --end-date 2023-12-31 --openai-api-key your_openai_api_key`
+### Analyze Command
 
-Arguments:
-- `--dbt-project`: Path to the dbt project
-- `--start-date`: Start date for query analysis (YYYY-MM-DD)
-- `--end-date`: End date for query analysis (YYYY-MM-DD)
-- `--openai-api-key`: OpenAI API key
+Analyze query patterns and generate optimization recommendations:
 
-### Streamlit web interface
-Run the Streamlit app:  
-  `streamlit run streamlit_app.py`
-Your default web browser should automatically open to `http://localhost:8501`. If it doesn't, you can manually open this URL.
+```bash
+python cli.py analyze [OPTIONS]
 
-Use the sidebar to input your configuration:
-- Enter the path to your dbt project
-- Select the start and end dates for query analysis
-- Input your OpenAI API key
-- Provide your ClickHouse credentials
+Options:
+  --days INTEGER              Number of days to analyze [default: 7]
+  --focus [queries|models]    Analysis focus [default: queries]
+  --min-frequency INTEGER     Minimum query frequency [default: 5]
+  --sample-size INTEGER      Sample size for pattern analysis
+  --batch-size INTEGER       Batch size for processing
+  --include-users TEXT       Include specific users
+  --exclude-users TEXT       Exclude specific users
+  --query-kinds TEXT         Filter by query kinds
+  --cache / --no-cache      Use cached data [default: True]
+  --force-reset             Force cache reset
+  --level TEXT              Analysis level
+  --dbt-project TEXT        dbt project path
+  --select-patterns TEXT    Filter specific patterns
+  --select-models TEXT      Filter specific models
+  --sort-by TEXT           Sort results by [frequency|duration|memory]
+  --page-size INTEGER      Results per page [default: 20]
+```
 
-Click the "Analyze and Suggest" button to start the analysis process.
+### Export Command
 
+Export analysis results to JSON:
 
-## Workflow
+```bash
+python cli.py export [OPTIONS]
 
-1. The script will prompt for ClickHouse credentials.
-2. Retrieves and preprocesses query logs from ClickHouse.
-3. Analyzes queries to identify common patterns.
-4. Analyzes the dbt project structure.
-5. Generates improvement suggestions using the OpenAI API.
-6. Outputs suggestions for dbt project improvements.
+Options:
+  --output TEXT  Output file path [default: stdout]
+```
 
-## Modules
+## Docker Support
 
-### ClickHouseDataAcquisition
+Run QuerySight in a Docker container:
 
-Responsible for retrieving query logs from ClickHouse, preprocessing the data, and analyzing queries.
+```bash
+# Build and run with docker-compose
+docker-compose up --build
 
-### DBTProjectAnalyzer
-
-Analyzes the dbt project structure, including models, sources, and macros.
-
-### AISuggester
-
-Uses the OpenAI API to generate improvement suggestions based on query analysis and dbt structure.
-
-## Security
-
-- Do not store ClickHouse credentials or OpenAI API key in the code. Use environment variables or a secure secret storage.
-- Ensure you have the necessary permissions to access ClickHouse query logs.
+# Or run directly with Docker
+docker build -t querysight .
+docker run -it --network host \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v /path/to/dbt:/app/dbt_project:ro \
+  -v ./logs:/app/logs \
+  -v ./.cache:/app/.cache \
+  --env-file .env \
+  querysight analyze --days 7
+```
 
 ## Contributing
 
-Please create issues to report problems or suggest new features. Pull requests are welcome!
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the `LICENSE` file for details.
