@@ -2,8 +2,6 @@ services:
   querysight:
     build: .
     network_mode: "host"
-    ports:
-      - "8501:8501"
     environment:
       - CLICKHOUSE_HOST=localhost
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9000}

@@ -24,8 +24,5 @@ RUN mkdir -p logs && chmod 777 logs
 # Create cache directory for sampling wizard
 RUN mkdir -p .cache && chmod 777 .cache
 
-# Expose Streamlit port
-EXPOSE 8501
-
 # Command to run the application
-CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0"]
+ENTRYPOINT ["python", "cli.py"]
