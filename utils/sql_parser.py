@@ -1,6 +1,6 @@
 """SQL parsing utilities for QuerySight."""
 import sqlparse
-from sqlparse.sql import Token, TokenList, Identifier, Function
+from sqlparse.sql import Token, TokenList, Identifier, Function, Parenthesis
 from sqlparse.tokens import Keyword, Name, DML, Punctuation
 from typing import Set, List, Optional
 import re
@@ -13,59 +13,62 @@ class SQLTableExtractor:
     
     def __init__(self):
         self.table_refs = set()
-        self.current_cte_names = set()  # Track CTE names to avoid treating them as table refs
+        self.cte_names = set()  # Track CTE names to avoid treating them as table refs
         
     def _clean_identifier(self, identifier: str) -> str:
         """Clean and normalize table identifiers."""
         # Remove quotes and backticks
         clean = re.sub(r'[`"\']+', '', identifier)
-        # Take last part of qualified name (e.g., schema.table -> table)
-        parts = clean.split('.')
-        return parts[-1].strip().lower()
+        # Remove alias if present (handling both 'table alias' and 'table AS alias')
+        clean = re.split(r'\s+(?:AS\s+)?', clean)[0]
+        # Handle special case where alias is stuck to the table name
+        if clean.endswith(('c', 'up')):  # Common aliases in the query
+            clean = clean[:-1]
+        return clean.strip()
     
-    def _extract_from_token(self, token: Token) -> List[str]:
-        """Extract table name variations from a token, handling quoted and qualified names."""
-        if not token:
-            return []
+    def _extract_from_token(self, token_value: str) -> Set[str]:
+        """Extract table reference variations from a token value."""
+        if not token_value or token_value.lower() in self.cte_names:
+            return set()
             
-        # Handle quoted identifiers
-        value = token.value.strip('`"\' ')
-        # Split on dots for qualified names
-        parts = [p.strip('`"\' ') for p in value.split('.')]
+        # Clean the identifier first
+        token_value = self._clean_identifier(token_value)
+        parts = token_value.split('.')
+        variations = set()
         
-        if not parts:
-            return []
-        
-        # Generate all possible variations
-        variations = []
-        # Just table name
-        variations.append(parts[-1].lower())
-        
-        if len(parts) >= 2:
-            # schema.table
-            variations.append(f"{parts[-2]}.{parts[-1]}".lower())
-        
-        if len(parts) >= 3:
-            # database.schema.table
-            variations.append(f"{parts[-3]}.{parts[-2]}.{parts[-1]}".lower())
+        if len(parts) == 1:
+            variations.add(parts[0])
+        elif len(parts) == 2:
+            schema, table = parts
+            variations.add(f"{schema}.{table}")
+            variations.add(table)
+        elif len(parts) == 3:
+            database, schema, table = parts
+            variations.add(f"{database}.{schema}.{table}")
+            variations.add(f"{schema}.{table}")
+            variations.add(table)
             
-        return variations
+        return {v.lower() for v in variations if v}
     
     def _process_identifier(self, identifier: Identifier) -> None:
         """Process an SQL identifier token to extract table references."""
         # Skip if this is a CTE name
-        if identifier.value.lower() in self.current_cte_names:
+        identifier_str = str(identifier)
+        if self._clean_identifier(identifier_str).lower() in self.cte_names:
             return
             
         # Get the real name part
-        name_token = None
+        name_parts = []
         for token in identifier.tokens:
-            if token.ttype in (Name, Name.Placeholder):
-                name_token = token
-                break
+            if isinstance(token, (Identifier, Function)):
+                name_parts.append(token.value)
+            elif token.ttype in (Name, Name.Placeholder) or token.value == '.':
+                name_parts.append(token.value)
         
-        if name_token:
-            table_variations = self._extract_from_token(name_token)
+        if name_parts:
+            # Join parts and clean
+            table_name = ''.join(name_parts)
+            table_variations = self._extract_from_token(table_name)
             self.table_refs.update(table_variations)
     
     def _process_function(self, func: Function) -> None:
@@ -88,24 +91,26 @@ class SQLTableExtractor:
                 # source('source_name', 'table_name')
                 self.table_refs.add(f"{args[0]}.{args[1]}")
     
-    def _extract_cte_names(self, statement: TokenList) -> None:
-        """Extract CTE (Common Table Expression) names to avoid treating them as table refs."""
-        with_seen = False
-        for token in statement.tokens:
-            # Look for WITH keyword
-            if token.ttype is Keyword and token.value.upper() == 'WITH':
-                with_seen = True
+    def _extract_cte_names(self, token_list: TokenList) -> None:
+        """Extract CTE names to avoid treating them as table references."""
+        in_cte = False
+        for token in token_list.tokens:
+            if token.ttype is Keyword.CTE and token.value.upper() == 'WITH':
+                in_cte = True
                 continue
                 
-            if with_seen and isinstance(token, Identifier):
-                # Add CTE name to our set
-                cte_name = self._clean_identifier(token.value)
-                if cte_name:
-                    self.current_cte_names.add(cte_name)
-                    
-            # Stop looking after we find the first non-CTE token
-            if with_seen and token.ttype is Keyword and token.value.upper() != 'WITH':
-                break
+            if in_cte and isinstance(token, Identifier):
+                # Add CTE name to ignore list
+                cte_name = self._clean_identifier(str(token))
+                self.cte_names.add(cte_name.lower())
+                
+            if isinstance(token, Parenthesis):
+                # Process the CTE definition for table references
+                self._process_token_list(token)
+                
+            # End CTE section when we hit a SELECT
+            if token.ttype is DML and token.value.upper() == 'SELECT':
+                in_cte = False
     
     def _process_token_list(self, token_list: TokenList) -> None:
         """Recursively process a token list to find table references."""
@@ -119,25 +124,41 @@ class SQLTableExtractor:
             # Handle FROM and JOIN keywords
             if token.ttype is Keyword:
                 upper_val = token.value.upper()
-                is_from = upper_val == 'FROM'
-                is_join = 'JOIN' in upper_val
+                if upper_val == 'FROM':
+                    is_from = True
+                    is_join = False
+                elif 'JOIN' in upper_val:
+                    is_join = True
+                    is_from = False
+                continue
+                
+            # Process subqueries in CTEs
+            if isinstance(token, Parenthesis):
+                self._process_token_list(token)
                 continue
                 
             # Skip if not after FROM/JOIN
             if not (is_from or is_join):
                 continue
                 
-            # Reset flags
-            is_from = False
-            is_join = False
-            
+            # Process the token
             if isinstance(token, TokenList):
-                self._process_token_list(token)
-            elif isinstance(token, Identifier):
-                self._process_identifier(token)
+                if isinstance(token, Identifier):
+                    self._process_identifier(token)
+                else:
+                    self._process_token_list(token)
             elif isinstance(token, Function):
                 self._process_function(token)
-    
+            elif token.ttype is None and not token.is_whitespace:
+                # This might be a table reference
+                table_variations = self._extract_from_token(token.value)
+                self.table_refs.update(table_variations)
+            
+            # Reset flags after non-whitespace tokens
+            if not token.is_whitespace:
+                is_from = False
+                is_join = False
+
     def extract_tables(self, sql: str) -> Set[str]:
         """
         Extract table references from a SQL query.
@@ -151,7 +172,7 @@ class SQLTableExtractor:
         try:
             # Reset state
             self.table_refs.clear()
-            self.current_cte_names.clear()
+            self.cte_names.clear()
             
             # Parse SQL
             statements = sqlparse.parse(sql)
