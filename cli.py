@@ -594,15 +594,15 @@ def execute_optimization(components, analysis_result, progress, task):
             progress.update(task, completed=100)
             logger.info("Using cached recommendations")
         else:
-            recommendations = components['ai_suggester'].generate_suggestions(
-                analysis_result=analysis_result,
-                max_patterns=5,
-                max_tokens=8000,
-                confidence_threshold=0.8
+            recommendations = components['ai_suggester'].generate_recommendations(
+                patterns=analysis_result.query_patterns,
+                dbt_models=analysis_result.dbt_models
             )
             
             if components.get('cache', True):
-                components['cache_manager'].cache_data(cache_key, recommendations)
+                # Convert recommendations to dictionaries before caching
+                recommendations_dict = [rec.to_dict() for rec in recommendations]
+                components['cache_manager'].cache_data(cache_key, recommendations_dict)
                 logger.info("Cached recommendations")
             
             progress.update(task, completed=100)
@@ -640,6 +640,24 @@ def display_analysis_results(analysis_result, patterns, recommendations, achieve
         title="Analysis Summary",
         border_style="green"
     ))
+
+def display_recommendations(recommendations: List[AIRecommendation]) -> None:
+    """Display AI-generated optimization recommendations"""
+    if not recommendations:
+        console.print("[yellow]No optimization recommendations generated[/yellow]")
+        return
+
+    console.print("\n[bold]AI Optimization Recommendations[/bold]")
+    for i, rec in enumerate(recommendations, 1):
+        panel = Panel(
+            f"Type: [cyan]{rec.type}[/cyan]\n"
+            f"Impact: [{'green' if rec.impact == 'HIGH' else 'yellow' if rec.impact == 'MEDIUM' else 'red'}]{rec.impact}[/]\n"
+            f"Description: {rec.description}\n"
+            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else ""),
+            title=f"Recommendation {i}",
+            expand=False
+        )
+        console.print(panel)
 
 @cli.command()
 @click.option('--output', type=click.Path(), help='Output file path (JSON)')
