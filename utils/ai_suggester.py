@@ -39,15 +39,15 @@ class AISuggester:
         
         # Detect query pattern type
         sql_lower = pattern.sql_pattern.lower()
-        pattern_type = "Unknown"
+        pattern_type = ""
         if "group by" in sql_lower:
-            pattern_type = "Aggregation"
+            pattern_type += "Aggregation|"
         elif "join" in sql_lower:
-            pattern_type = "Join"
+            pattern_type += "Join|"
         elif "where" in sql_lower:
-            pattern_type = "Filter"
-        elif "select" in sql_lower:
-            pattern_type = "Simple Select"
+            pattern_type += "Filter|"
+        elif "select" in sql_lower and pattern_type == "":
+            pattern_type += "Simple Select"
         
         prompt = (
             f"Analyze this SQL query pattern:\n"
