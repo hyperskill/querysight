@@ -22,14 +22,53 @@ class AISuggester:
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
         """Create a concise prompt for the AI model"""
+        
+        # Get DBT model information for referenced tables
+        model_info = []
+        for table in pattern.tables_accessed:
+            if table in pattern.dbt_models_used:
+                model = dbt_models.get(table)
+                if model:
+                    model_info.append(
+                        f"- {table}: materialized as {model.materialization}, "
+                        f"depends on [{', '.join(model.depends_on)}], "
+                        f"referenced by [{', '.join(model.referenced_by)}]"
+                    )
+            else:
+                model_info.append(f"- {table}: unmapped table")
+        
+        # Detect query pattern type
+        sql_lower = pattern.sql_pattern.lower()
+        pattern_type = "Unknown"
+        if "group by" in sql_lower:
+            pattern_type = "Aggregation"
+        elif "join" in sql_lower:
+            pattern_type = "Join"
+        elif "where" in sql_lower:
+            pattern_type = "Filter"
+        elif "select" in sql_lower:
+            pattern_type = "Simple Select"
+        
         prompt = (
             f"Analyze this SQL query pattern:\n"
-            f"Frequency: {pattern.frequency}\n"
+            f"Pattern Type: {pattern_type}\n"
+            f"Frequency: {pattern.frequency} executions\n"
             f"Avg Duration: {pattern.avg_duration_ms}ms\n"
+            f"Memory Usage: {pattern.memory_usage} bytes\n"
             f"Query Template:\n{pattern.sql_pattern}\n\n"
-            f"Tables Referenced: {', '.join(pattern.tables_accessed)}\n\n"
-            "Suggest ONE specific optimization focusing on performance. "
-            "Keep the response under 100 tokens. Format:\n"
+            f"Tables Referenced:\n" + "\n".join(model_info) + "\n\n"
+            "Suggest ONE specific optimization focusing on performance. Consider:\n"
+            "1. For high-frequency queries (>100/day), consider materialization\n"
+            "   - Especially if the query involves complex aggregations\n"
+            "   - Check if referenced tables are already materialized\n"
+            "2. For complex joins or subqueries, consider query rewrites\n"
+            "   - Look for opportunities to simplify joins\n"
+            "   - Consider pushing down predicates\n"
+            "   - Check for redundant subqueries\n"
+            "3. For simple lookups or filters, consider indexes\n"
+            "   - Particularly on frequently filtered columns\n"
+            "   - For join conditions\n\n"
+            "Format response as:\n"
             "Type: [INDEX|MATERIALIZATION|REWRITE]\n"
             "Description: [1-2 sentences]\n"
             "Impact: [HIGH|MEDIUM|LOW]\n"
