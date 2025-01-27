@@ -14,6 +14,7 @@ from typing import Optional, Dict, List
 
 import click
 from rich.console import Console
+from rich import box
 from rich.panel import Panel
 from rich.progress import Progress
 from rich.table import Table
@@ -162,58 +163,107 @@ def display_query_patterns(patterns: List[QueryPattern], sort_by: str = 'duratio
     console.print(stats_table)
 
 def display_model_coverage(result: AnalysisResult):
-    """Display dbt model coverage metrics"""
-    if not result or not result.model_coverage:
-        console.print("[yellow]No model coverage data available[/yellow]")
+    """Display dbt model coverage metrics with hierarchical relationships"""
+    if not result or not result.query_patterns:
+        console.print("[yellow]No query patterns available[/yellow]")
         return
-        
-    table = Table(title="DBT Model Coverage")
-    table.add_column("Model", style="cyan")
-    table.add_column("Coverage %", justify="right", style="green")
-    table.add_column("Query Patterns", justify="right")
-    table.add_column("Dependencies", style="blue")
-    
-    for model_name, coverage in result.model_coverage.items():
-        if model_name not in result.dbt_models:
-            continue
-            
-        model = result.dbt_models[model_name]
-        patterns_using_model = [
-            p for p in result.query_patterns
-            if model_name in p.dbt_models_used
-        ]
-        
-        table.add_row(
-            model_name,
-            f"{coverage * 100:.1f}%",
-            str(len(patterns_using_model)),
-            ", ".join(model.depends_on) or "None"
-        )
-    
-    console.print(table)
-    
-    # Display uncovered tables
-    if result.uncovered_tables:
-        console.print("\n[yellow]Uncovered Tables:[/yellow]")
-        for table in sorted(result.uncovered_tables):
-            console.print(f"  - {table}")
 
-def display_recommendations(recommendations: List[AIRecommendation]):
-    """Display AI-generated recommendations"""
-    if not recommendations:
-        console.print("[yellow]No recommendations available[/yellow]")
-        return
-        
-    for i, rec in enumerate(recommendations, 1):
-        panel = Panel(
-            f"[bold]{rec.type}[/bold]\n\n"
-            f"{rec.description}\n\n"
-            f"[blue]Impact: {rec.impact}[/blue]"
-            + (f"\n\n[green]Suggested SQL:[/green]\n{rec.suggested_sql}" if rec.suggested_sql else ""),
-            title=f"Recommendation {i}",
-            border_style="cyan"
+    # Display pattern-based coverage
+    console.print("\n[bold cyan]DBT Model Coverage Analysis[/bold cyan]")
+    
+    # First display patterns with model coverage
+    patterns_with_models = [p for p in result.query_patterns if p.dbt_models_used]
+    if patterns_with_models:
+        console.print("\n[bold green]Patterns Using DBT Models[/bold green]")
+        for pattern in patterns_with_models:
+            display_pattern_coverage(pattern, result)
+            console.print()  # Add spacing between patterns
+    
+    # Then display patterns with only unmapped tables
+    patterns_unmapped = [p for p in result.query_patterns 
+                        if not p.dbt_models_used and p.tables_accessed]
+    if patterns_unmapped:
+        console.print("\n[bold yellow]Patterns Using Only Unmapped Tables[/bold yellow]")
+        for pattern in patterns_unmapped:
+            display_pattern_coverage(pattern, result)
+            console.print()  # Add spacing between patterns
+    
+    # Finally display patterns with no table access
+    patterns_no_tables = [p for p in result.query_patterns 
+                         if not p.dbt_models_used and not p.tables_accessed]
+    if patterns_no_tables:
+        console.print("\n[bold red]Patterns Without Table Access[/bold red]")
+        for pattern in patterns_no_tables:
+            display_pattern_coverage(pattern, result)
+            console.print()  # Add spacing between patterns
+
+    # Display uncovered tables summary at the end
+    if result.uncovered_tables:
+        console.print("\n[bold yellow]Uncovered Tables Summary[/bold yellow]")
+        console.print(", ".join(sorted(result.uncovered_tables)))
+
+def display_pattern_coverage(pattern: QueryPattern, result: AnalysisResult):
+    """Display coverage information for a single pattern"""
+    pattern_table = Table(show_header=False, box=box.ROUNDED)
+    pattern_table.add_column("Property", style="bold blue")
+    pattern_table.add_column("Value")
+    
+    pattern_table.add_row("Pattern ID", pattern.pattern_id)
+    pattern_table.add_row("Frequency", str(pattern.frequency))
+    pattern_table.add_row("Avg Duration", f"{pattern.avg_duration_ms:.2f}ms")
+    pattern_table.add_row("SQL Pattern", pattern.sql_pattern)
+    
+    # Create nested table for model relationships
+    models_table = Table(show_header=True, box=box.SIMPLE)
+    models_table.add_column("Model Type", style="bold green")
+    models_table.add_column("Models")
+    
+    # Add directly used models
+    if pattern.dbt_models_used:
+        models_table.add_row(
+            "Direct Models",
+            ", ".join(sorted(pattern.dbt_models_used))
         )
-        console.print(panel)
+        
+        # Collect all parent and child models
+        all_parents = set()
+        all_children = set()
+        for model_name in pattern.dbt_models_used:
+            model = result.dbt_models.get(model_name)
+            if model:
+                all_parents.update(model.depends_on)
+                all_children.update(model.referenced_by)
+        
+        # Remove direct models from parents/children to avoid duplication
+        all_parents -= pattern.dbt_models_used
+        all_children -= pattern.dbt_models_used
+        
+        # Add parent models if any
+        if all_parents:
+            models_table.add_row(
+                "Parent Models",
+                ", ".join(sorted(all_parents))
+            )
+        
+        # Add child models if any
+        if all_children:
+            models_table.add_row(
+                "Child Models",
+                ", ".join(sorted(all_children))
+            )
+    
+    # Add tables that couldn't be mapped to models
+    unmapped_tables = pattern.tables_accessed - {
+        model_name for model_name in pattern.dbt_models_used
+    }
+    if unmapped_tables:
+        models_table.add_row(
+            "Unmapped Tables",
+            ", ".join(sorted(unmapped_tables))
+        )
+    
+    pattern_table.add_row("Model Coverage", models_table)
+    console.print(pattern_table)
 
 @click.group()
 def cli():
@@ -544,15 +594,15 @@ def execute_optimization(components, analysis_result, progress, task):
             progress.update(task, completed=100)
             logger.info("Using cached recommendations")
         else:
-            recommendations = components['ai_suggester'].generate_suggestions(
-                analysis_result=analysis_result,
-                max_patterns=5,
-                max_tokens=8000,
-                confidence_threshold=0.8
+            recommendations = components['ai_suggester'].generate_recommendations(
+                patterns=analysis_result.query_patterns,
+                dbt_models=analysis_result.dbt_models
             )
             
             if components.get('cache', True):
-                components['cache_manager'].cache_data(cache_key, recommendations)
+                # Convert recommendations to dictionaries before caching
+                recommendations_dict = [rec.to_dict() for rec in recommendations]
+                components['cache_manager'].cache_data(cache_key, recommendations_dict)
                 logger.info("Cached recommendations")
             
             progress.update(task, completed=100)
@@ -590,6 +640,24 @@ def display_analysis_results(analysis_result, patterns, recommendations, achieve
         title="Analysis Summary",
         border_style="green"
     ))
+
+def display_recommendations(recommendations: List[AIRecommendation]) -> None:
+    """Display AI-generated optimization recommendations"""
+    if not recommendations:
+        console.print("[yellow]No optimization recommendations generated[/yellow]")
+        return
+
+    console.print("\n[bold]AI Optimization Recommendations[/bold]")
+    for i, rec in enumerate(recommendations, 1):
+        panel = Panel(
+            f"Type: [cyan]{rec.type}[/cyan]\n"
+            f"Impact: [{'green' if rec.impact == 'HIGH' else 'yellow' if rec.impact == 'MEDIUM' else 'red'}]{rec.impact}[/]\n"
+            f"Description: {rec.description}\n"
+            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else ""),
+            title=f"Recommendation {i}",
+            expand=False
+        )
+        console.print(panel)
 
 @cli.command()
 @click.option('--output', type=click.Path(), help='Output file path (JSON)')
