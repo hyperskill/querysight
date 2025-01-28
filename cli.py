@@ -401,7 +401,7 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
         # Initialize AI suggester if API key is available
         ai_suggester = None
         if Config.OPENAI_API_KEY:
-            ai_suggester = AISuggester(Config.OPENAI_API_KEY)
+            ai_suggester = AISuggester(Config.OPENAI_API_KEY, Config.OPENAI_MODEL)
         
         return {
             'data_acquisition': data_acquisition,

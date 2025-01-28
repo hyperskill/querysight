@@ -16,9 +16,10 @@ logger = setup_logger(__name__)
 class AISuggester:
     """AI-powered query optimization suggester"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str):
         self.api_key = api_key
         self.client = OpenAI(api_key=api_key)
+        self.model = model
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
         """Create a concise prompt for the AI model"""
@@ -89,7 +90,7 @@ class AISuggester:
                 prompt = self._create_prompt(pattern, dbt_models)
                 
                 response = self.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=self.model,
                     messages=[
                         {"role": "system", "content": "You are a SQL optimization expert. Provide brief, actionable recommendations."},
                         {"role": "user", "content": prompt}

@@ -22,7 +22,8 @@ class Config:
 
     # OpenAI configuration
     OPENAI_API_KEY: Optional[str] = os.getenv('OPENAI_API_KEY')
-    
+    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+   
     # DBT configuration
     DBT_PROJECT_PATH: str = os.getenv('DBT_PROJECT_PATH', '')
     logger.info(f"Loaded DBT_PROJECT_PATH: {DBT_PROJECT_PATH}")
@@ -39,6 +40,7 @@ class Config:
             'CLICKHOUSE_PASSWORD': cls.CLICKHOUSE_PASSWORD,
             'CLICKHOUSE_DATABASE': cls.CLICKHOUSE_DATABASE,
             'OPENAI_API_KEY': cls.OPENAI_API_KEY,
+            'OPENAI_MODEL': cls.OPENAI_MODEL,
             'DBT_PROJECT_PATH': cls.DBT_PROJECT_PATH
         }
         
