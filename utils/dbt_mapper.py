@@ -172,10 +172,8 @@ class DBTModelMapper:
                 )
                 self.model_info[name] = model_info
                 
-                # Add mappings for different name formats
-                self.table_to_model[name.lower()] = name
+                # Only store the canonical form (schema.name)
                 self.table_to_model[f"{schema}.{name}".lower()] = name
-                self.table_to_model[f"{database}.{schema}.{name}".lower()] = name
     
     def _load_from_files(self, default_schema: str, default_database: str) -> None:
         """Load model information from SQL files when manifest is not available."""

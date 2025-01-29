@@ -33,17 +33,14 @@ class SQLTableExtractor:
         parts = token_value.split('.')
         variations = set()
         
+        # Only keep schema.table format for consistency with DBT mapping
         if len(parts) == 1:
+            # For unqualified tables, we can't determine the schema
             variations.add(parts[0])
-        elif len(parts) == 2:
-            schema, table = parts
+        elif len(parts) >= 2:
+            # Always use last two parts (schema.table)
+            schema, table = parts[-2:]
             variations.add(f"{schema}.{table}")
-            variations.add(table)
-        elif len(parts) == 3:
-            database, schema, table = parts
-            variations.add(f"{database}.{schema}.{table}")
-            variations.add(f"{schema}.{table}")
-            variations.add(table)
             
         return {v.lower() for v in variations if v}
     
