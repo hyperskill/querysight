@@ -19,11 +19,8 @@ class SQLTableExtractor:
         """Clean and normalize table identifiers."""
         # Remove quotes and backticks
         clean = re.sub(r'[`"\']+', '', identifier)
-        # Remove alias if present (handling both 'table alias' and 'table AS alias')
-        clean = re.split(r'\s+(?:AS\s+)?', clean)[0]
-        # Handle special case where alias is stuck to the table name
-        if clean.endswith(('c', 'up')):  # Common aliases in the query
-            clean = clean[:-1]
+        # Remove alias if present (handling both 'AS alias' and plain 'alias')
+        clean = re.split(r'\s+(?=AS\s+|\w+)', clean)[0]
         return clean.strip()
     
     def _extract_from_token(self, token_value: str) -> Set[str]:
@@ -60,6 +57,9 @@ class SQLTableExtractor:
         # Get the real name part
         name_parts = []
         for token in identifier.tokens:
+            if token.is_whitespace:
+                # Stop at first whitespace - anything after is likely an alias
+                break
             if isinstance(token, (Identifier, Function)):
                 name_parts.append(token.value)
             elif token.ttype in (Name, Name.Placeholder) or token.value == '.':
