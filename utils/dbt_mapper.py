@@ -118,19 +118,30 @@ class DBTModelMapper:
             logger.error(f"Error loading sources: {str(e)}")
     
     def _get_schema_for_path(self, dir_path: str, project_name: str) -> str:
-        """Get schema name based on directory path and project name."""
-        # Base schema is project name without _dbt suffix
-        schema = project_name.replace('_dbt', '')
+        """Get schema name based on directory path and project config.
         
-        # Check if path contains private or reports folder
-        path_parts = dir_path.split(os.sep)
+        Args:
+            dir_path: Relative path from models directory
+            project_name: Project name from dbt_project.yml
+            
+        Returns:
+            Schema name with appropriate suffix based on config
+        """
+        # Start with base schema (project name)
+        schema = project_name.replace('_dbt', '')  # Remove _dbt suffix if present
+        
+        # Split path into parts for hierarchical lookup
+        path_parts = [p for p in dir_path.split(os.sep) if p]
+        
+        # Check for schema suffixes based on directory structure
         if 'private' in path_parts:
             schema = f"{schema}_private"
         elif 'reports' in path_parts:
             schema = f"{schema}_reports"
             
+        logger.info(f"Resolved schema for path {dir_path}: {schema}")
         return schema
-    
+
     def _load_from_manifest(self, manifest: dict, default_schema: str, default_database: str) -> None:
         """Load model information from manifest.json."""
         nodes = manifest.get('nodes', {})
@@ -170,13 +181,13 @@ class DBTModelMapper:
         """Load model information from SQL files when manifest is not available."""
         # First load project-level configs
         project_config = self._load_project_config()
-        project_name = project_config.get('name', 'hyperskill_dbt')  # Default to hyperskill_dbt if not found
+        project_name = project_config.get('name', 'hyperskill_dbt')
         model_configs = project_config.get('models', {})
         
         # Get default configs from project
         project_materialized = model_configs.get('materialized', 'view')
         
-        # Load all schema.yml files first
+        # Load all schema.yml files first to get model-specific configs
         schema_configs = {}
         for yml_file in glob.glob(os.path.join(self.models_path, '**/*.yml'), recursive=True):
             try:
@@ -232,7 +243,7 @@ class DBTModelMapper:
                             match = re.search(rf"{key}\s*=\s*'([^']*)'", config_str)
                             if match:
                                 config[key] = match.group(1)
-                
+            
                 # Create model info
                 model_info = DBTModelInfo(
                     name=name,
@@ -250,7 +261,7 @@ class DBTModelMapper:
                 
             except Exception as e:
                 logger.error(f"Error loading model from {sql_file}: {str(e)}")
-    
+
     def get_model_name(self, table_reference: str) -> Optional[str]:
         """
         Get the dbt model name for a table reference.
@@ -265,32 +276,29 @@ class DBTModelMapper:
         model_name = self.table_to_model.get(table_reference.lower())
         if model_name:
             return model_name
-            
+        
         # Split into parts
         parts = [p.strip() for p in table_reference.split('.')]
         if not parts:
             return None
-            
+        
         # Try just the table name
-        if len(parts) > 1:
-            model_name = self.table_to_model.get(parts[-1].lower())
-            if model_name:
-                return model_name
-                
+        table_name = parts[-1]
+        model_name = self.table_to_model.get(table_name.lower())
+        if model_name:
+            return model_name
+        
         # Try schema.table if we have enough parts
         if len(parts) >= 2:
-            schema_table = f"{parts[-2]}.{parts[-1]}".lower()
+            schema_table = f"{parts[-2]}.{table_name}".lower()
             model_name = self.table_to_model.get(schema_table)
             if model_name:
                 return model_name
-                
-        # Try database.schema.table if we have all parts
-        if len(parts) >= 3:
-            full_name = f"{parts[-3]}.{parts[-2]}.{parts[-1]}".lower()
-            model_name = self.table_to_model.get(full_name)
-            if model_name:
-                return model_name
-                
+            
+        # Log the failed mapping attempt
+        logger.debug(f"No mapping found for table reference: {table_reference}")
+        logger.debug(f"Available mappings: {list(self.table_to_model.keys())}")
+        
         return None
     
     def get_model_info(self, model_name: str) -> Optional[DBTModelInfo]:
