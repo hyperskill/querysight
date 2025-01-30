@@ -22,42 +22,58 @@ class AISuggester:
         self.model = model
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
-        """Create a concise prompt for the AI model"""
+        """Create a concise prompt focusing on model lists in JSON format"""
+        # Get unmapped tables
+        unmapped_tables = pattern.tables_accessed - pattern.dbt_models_used
         
-        # Get DBT model information for referenced tables
-        model_info = []
-        for table in pattern.tables_accessed:
-            if table in pattern.dbt_models_used:
-                model = dbt_models.get(table)
-                if model:
-                    model_info.append(
-                        f"- {table}: materialized as {model.materialization}, "
-                        f"depends on [{', '.join(model.depends_on)}], "
-                        f"referenced by [{', '.join(model.referenced_by)}]"
-                    )
-            else:
-                model_info.append(f"- {table}: unmapped table")
+        # Get model details in a structured format
+        mapped_models = []
+        for model_name in pattern.dbt_models_used:
+            model = dbt_models.get(model_name)
+            if model:
+                mapped_models.append({
+                    "name": model_name,
+                    "materialization": model.materialization,
+                    "dependencies": list(model.depends_on),
+                    "referenced_by": list(model.referenced_by)
+                })
         
         # Detect query pattern type
         sql_lower = pattern.sql_pattern.lower()
-        pattern_type = ""
+        pattern_types = []
         if "group by" in sql_lower:
-            pattern_type += "Aggregation|"
-        elif "join" in sql_lower:
-            pattern_type += "Join|"
-        elif "where" in sql_lower:
-            pattern_type += "Filter|"
-        elif "select" in sql_lower and pattern_type == "":
-            pattern_type += "Simple Select"
+            pattern_types.append("Aggregation")
+        if "join" in sql_lower:
+            pattern_types.append("Join")
+        if "where" in sql_lower:
+            pattern_types.append("Filter")
+        if not pattern_types and "select" in sql_lower:
+            pattern_types.append("Simple Select")
+        
+        # Create JSON structure for the prompt
+        context = {
+            "query": {
+                "pattern_type": pattern_types,
+                "frequency": pattern.frequency,
+                "avg_duration_ms": pattern.avg_duration_ms,
+                "memory_usage": pattern.memory_usage,
+                "sql": pattern.sql_pattern
+            },
+            "models": {
+                "mapped": mapped_models,
+                "unmapped": list(unmapped_tables)
+            }
+        }
+        
+        # Convert to formatted JSON string
+        context_json = json.dumps(context, indent=2)
         
         prompt = (
-            f"Analyze this SQL query pattern:\n"
-            f"Pattern Type: {pattern_type}\n"
-            f"Frequency: {pattern.frequency} executions\n"
-            f"Avg Duration: {pattern.avg_duration_ms}ms\n"
-            f"Memory Usage: {pattern.memory_usage} bytes\n"
-            f"Query Template:\n{pattern.sql_pattern}\n\n"
-            f"Tables Referenced:\n" + "\n".join(model_info) + "\n\n"
+            f"Analyze this query pattern. Below is a JSON structure containing:\n"
+            f"1. Query information including pattern type, metrics, and SQL\n"
+            f"2. Lists of mapped DBT models with their properties\n"
+            f"3. List of unmapped tables\n\n"
+            f"{context_json}\n\n"
             "Suggest ONE specific optimization focusing on performance. Consider:\n"
             "1. For high-frequency queries (>100/day), consider materialization\n"
             "   - Especially if the query involves complex aggregations\n"
@@ -70,8 +86,8 @@ class AISuggester:
             "   - Particularly on frequently filtered columns\n"
             "   - For join conditions\n\n"
             "Format response as:\n"
-            "Type: [INDEX|MATERIALIZATION|REWRITE]\n"
-            "Description: [1-2 sentences]\n"
+            "Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
+            "Description: [1-4 sentences]\n"
             "Impact: [HIGH|MEDIUM|LOW]\n"
             "SQL: [optional improved query]"
         )
