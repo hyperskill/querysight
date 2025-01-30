@@ -649,11 +649,27 @@ def display_recommendations(recommendations: List[AIRecommendation]) -> None:
 
     console.print("\n[bold]AI Optimization Recommendations[/bold]")
     for i, rec in enumerate(recommendations, 1):
+        # Create metadata section if available
+        metadata_section = ""
+        if rec.pattern_metadata:
+            metadata = rec.pattern_metadata
+            metadata_section = (
+                f"\nPattern Details:\n"
+                f"• SQL Pattern:\n[blue]{metadata['sql_pattern']}[/blue]\n"  # Add SQL pattern display
+                f"• Frequency: {metadata['frequency']} queries\n"
+                f"• Avg Duration: {metadata['avg_duration_ms']:.2f} ms\n"
+                f"• Memory Usage: {metadata['memory_usage'] / (1024*1024):.2f} MB\n"
+                f"• Tables: {', '.join(metadata['tables_accessed'][:3])}{'...' if len(metadata['tables_accessed']) > 3 else ''}\n"
+                f"• DBT Models: {', '.join(metadata['dbt_models_used'][:3])}{'...' if len(metadata['dbt_models_used']) > 3 else ''}\n"
+                f"• Complexity Score: {metadata['complexity_score']:.2f}"
+            )
+
         panel = Panel(
             f"Type: [cyan]{rec.type}[/cyan]\n"
             f"Impact: [{'green' if rec.impact == 'HIGH' else 'yellow' if rec.impact == 'MEDIUM' else 'red'}]{rec.impact}[/]\n"
             f"Description: {rec.description}\n"
-            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else ""),
+            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else "")
+            + metadata_section,
             title=f"Recommendation {i}",
             expand=False
         )

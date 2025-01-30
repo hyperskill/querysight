@@ -124,11 +124,29 @@ class AISuggester:
                 impact = parts[2].split(': ')[1] if len(parts) > 2 else "UNKNOWN"
                 sql = parts[3].split(': ')[1] if len(parts) > 3 and 'SQL: ' in parts[3] else None
                 
+                # Create pattern metadata dictionary
+                pattern_metadata = {
+                    'pattern_id': pattern.pattern_id,
+                    'sql_pattern': pattern.sql_pattern,
+                    'frequency': pattern.frequency,
+                    'avg_duration_ms': pattern.avg_duration_ms,
+                    'memory_usage': pattern.memory_usage,
+                    'total_read_rows': pattern.total_read_rows,
+                    'total_read_bytes': pattern.total_read_bytes,
+                    'tables_accessed': list(pattern.tables_accessed),
+                    'dbt_models_used': list(pattern.dbt_models_used),
+                    'first_seen': pattern.first_seen.isoformat() if pattern.first_seen else None,
+                    'last_seen': pattern.last_seen.isoformat() if pattern.last_seen else None,
+                    'users': list(pattern.users),
+                    'complexity_score': pattern.complexity_score
+                }
+                
                 recommendations.append(AIRecommendation(
                     type=rec_type,
                     description=description,
                     impact=impact,
-                    suggested_sql=sql
+                    suggested_sql=sql,
+                    pattern_metadata=pattern_metadata
                 ))
                 
             except Exception as e:
