@@ -30,6 +30,7 @@ from utils.data_acquisition import ClickHouseDataAcquisition
 from utils.dbt_analyzer import DBTProjectAnalyzer
 from utils.ai_suggester import AISuggester
 from utils.cache_manager import QueryLogsCacheManager
+from utils.filtering import filter_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ def cli():
 @click.option('--days', default=7, help='Number of days of query history to analyze')
 @click.option('--focus', default='all', help='Analysis focus: slow (long-running queries), frequent (high-frequency queries), or all')
 @click.option('--min-frequency', default=2, help='Minimum frequency threshold for query patterns')
+@click.option('--min-duration', type=float, help='Minimum average query duration in milliseconds')
 @click.option('--sample-size', default=1.0, help='Sample size ratio (0.0-1.0) of query logs to analyze')
 @click.option('--batch-size', default=1000, help='Number of queries to process in each batch')
 @click.option('--include-users', help='Filter specific users to include (comma-separated)')
@@ -289,13 +291,14 @@ def cli():
 @click.option('--level', default='optimization', help='Analysis depth: data_collection, pattern_analysis, dbt_integration, or optimization')
 @click.option('--dbt-project', help='Path to dbt project for model analysis')
 @click.option('--select-patterns', help='Filter specific query patterns to analyze (comma-separated IDs)')
-@click.option('--select-models', help='Filter specific dbt models to analyze (comma-separated names)')
+@click.option('--select-tables', help='Filter patterns by table names (comma-separated)')
+@click.option('--select-models', help='Filter patterns by dbt model names (comma-separated)')
 @click.option('--sort-by', type=click.Choice(['frequency', 'duration', 'memory']), default='duration',
               help='Sort patterns by frequency, duration, or memory usage')
 @click.option('--page-size', type=int, default=20, help='Number of patterns to show per page')
-def analyze(days, focus, min_frequency, sample_size, batch_size, include_users,
+def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, include_users,
            exclude_users, query_kinds, cache, force_reset, level, dbt_project, select_patterns,
-           select_models, sort_by, page_size):
+           select_tables, select_models, sort_by, page_size):
     try:
         logger.info("Starting analysis with parameters:")
         logger.info(f"  Days: {days}")
@@ -332,6 +335,30 @@ def analyze(days, focus, min_frequency, sample_size, batch_size, include_users,
                 progress, 
                 tasks.get('pattern_analysis', tasks['data_collection'])  # Fallback to data_collection task
             )
+            
+            # Build filter criteria from options
+            filter_criteria = {}
+            if select_patterns:
+                filter_criteria['pattern_ids'] = select_patterns.split(',')
+            if min_duration:
+                filter_criteria['min_duration'] = min_duration
+            if min_frequency:
+                filter_criteria['min_frequency'] = min_frequency
+            if select_tables:
+                filter_criteria['tables'] = select_tables.split(',')
+            if select_models:
+                filter_criteria['dbt_models'] = select_models.split(',')
+            
+            # Apply filters if any criteria specified
+            if filter_criteria:
+                original_count = len(patterns)
+                patterns = filter_patterns(patterns, filter_criteria)
+                logger.info(f"Filtered patterns from {original_count} to {len(patterns)} based on criteria: {filter_criteria}")
+                
+                if not patterns:
+                    console.print("[yellow]No patterns match the specified filter criteria[/yellow]")
+                    return
+            
             if target_level == AnalysisLevel.PATTERN_ANALYSIS.value:
                 display_analysis_results(None, patterns, [], target_level)
                 return
@@ -612,34 +639,68 @@ def execute_optimization(components, analysis_result, progress, task):
         logger.error(f"Optimization analysis failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"Optimization analysis failed: {str(e)}")
 
-def display_analysis_results(analysis_result, patterns, recommendations, achieved_level):
-    """Display analysis results based on achieved level"""
-    console.print("\n[bold green]Analysis Complete![/bold green]\n")
+def display_analysis_results(analysis_result, patterns, recommendations, level):
+    """Display analysis results based on the level"""
+    try:
+        if level == AnalysisLevel.DATA_COLLECTION.value:
+            console.print("[green]Data collection completed successfully[/green]")
+            return
+            
+        if level == AnalysisLevel.PATTERN_ANALYSIS.value:
+            console.print(f"\n[bold cyan]Found {len(patterns)} query patterns:[/bold cyan]")
+            
+            # Create pattern table
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("Pattern ID", style="dim")
+            table.add_column("Frequency", justify="right")
+            table.add_column("Avg Duration (ms)", justify="right")
+            table.add_column("Memory Usage (MB)", justify="right")
+            table.add_column("Tables", style="cyan")
+            
+            for pattern in patterns:
+                table.add_row(
+                    pattern.pattern_id,
+                    str(pattern.frequency),
+                    f"{pattern.avg_duration_ms:.2f}",
+                    f"{pattern.memory_usage / (1024*1024):.2f}",
+                    ", ".join(sorted(pattern.tables_accessed)[:3]) + 
+                    ("..." if len(pattern.tables_accessed) > 3 else "")
+                )
+            
+            console.print(table)
+            return
+        
+        console.print("\n[bold green]Analysis Complete![/bold green]\n")
+        
+        # Always show query count first
+        if isinstance(patterns, list):
+            console.print(f"[bold]Found {len(patterns)} query patterns[/bold]")
+        
+        # Always show patterns if we have them
+        if patterns:
+            console.print("\n[bold]Query Pattern Analysis[/bold]")
+            display_query_patterns(patterns, sort_by='duration', page_size=20)
+        else:
+            console.print("\n[yellow]No query patterns found[/yellow]")
+        
+        if analysis_result:
+            console.print("\n[bold]DBT Model Coverage[/bold]")
+            display_model_coverage(analysis_result)
+        
+        if recommendations:
+            console.print("\n[bold]AI Recommendations[/bold]")
+            display_recommendations(recommendations)
+        
+        console.print(Panel(
+            f"Analysis completed at level: [cyan]{level}[/cyan]",
+            title="Analysis Summary",
+            border_style="green"
+        ))
     
-    # Always show query count first
-    if isinstance(patterns, list):
-        console.print(f"[bold]Found {len(patterns)} query patterns[/bold]")
-    
-    # Always show patterns if we have them
-    if patterns:
-        console.print("\n[bold]Query Pattern Analysis[/bold]")
-        display_query_patterns(patterns, sort_by='duration', page_size=20)
-    else:
-        console.print("\n[yellow]No query patterns found[/yellow]")
-    
-    if analysis_result:
-        console.print("\n[bold]DBT Model Coverage[/bold]")
-        display_model_coverage(analysis_result)
-    
-    if recommendations:
-        console.print("\n[bold]AI Recommendations[/bold]")
-        display_recommendations(recommendations)
-    
-    console.print(Panel(
-        f"Analysis completed at level: [cyan]{achieved_level}[/cyan]",
-        title="Analysis Summary",
-        border_style="green"
-    ))
+    except Exception as e:
+        logger.error(f"Failed to display analysis results: {str(e)}", exc_info=True)
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
 
 def display_recommendations(recommendations: List[AIRecommendation]) -> None:
     """Display AI-generated optimization recommendations"""
@@ -649,11 +710,27 @@ def display_recommendations(recommendations: List[AIRecommendation]) -> None:
 
     console.print("\n[bold]AI Optimization Recommendations[/bold]")
     for i, rec in enumerate(recommendations, 1):
+        # Create metadata section if available
+        metadata_section = ""
+        if rec.pattern_metadata:
+            metadata = rec.pattern_metadata
+            metadata_section = (
+                f"\nPattern Details:\n"
+                f"• SQL Pattern:\n[blue]{metadata['sql_pattern']}[/blue]\n"  # Add SQL pattern display
+                f"• Frequency: {metadata['frequency']} queries\n"
+                f"• Avg Duration: {metadata['avg_duration_ms']:.2f} ms\n"
+                f"• Memory Usage: {metadata['memory_usage'] / (1024*1024):.2f} MB\n"
+                f"• Tables: {', '.join(metadata['tables_accessed'][:3])}{'...' if len(metadata['tables_accessed']) > 3 else ''}\n"
+                f"• DBT Models: {', '.join(metadata['dbt_models_used'][:3])}{'...' if len(metadata['dbt_models_used']) > 3 else ''}\n"
+                f"• Complexity Score: {metadata['complexity_score']:.2f}"
+            )
+
         panel = Panel(
             f"Type: [cyan]{rec.type}[/cyan]\n"
             f"Impact: [{'green' if rec.impact == 'HIGH' else 'yellow' if rec.impact == 'MEDIUM' else 'red'}]{rec.impact}[/]\n"
             f"Description: {rec.description}\n"
-            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else ""),
+            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else "")
+            + metadata_section,
             title=f"Recommendation {i}",
             expand=False
         )

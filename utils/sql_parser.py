@@ -19,11 +19,8 @@ class SQLTableExtractor:
         """Clean and normalize table identifiers."""
         # Remove quotes and backticks
         clean = re.sub(r'[`"\']+', '', identifier)
-        # Remove alias if present (handling both 'table alias' and 'table AS alias')
-        clean = re.split(r'\s+(?:AS\s+)?', clean)[0]
-        # Handle special case where alias is stuck to the table name
-        if clean.endswith(('c', 'up')):  # Common aliases in the query
-            clean = clean[:-1]
+        # Remove alias if present (handling both 'AS alias' and plain 'alias')
+        clean = re.split(r'\s+(?=AS\s+|\w+)', clean)[0]
         return clean.strip()
     
     def _extract_from_token(self, token_value: str) -> Set[str]:
@@ -36,17 +33,14 @@ class SQLTableExtractor:
         parts = token_value.split('.')
         variations = set()
         
+        # Only keep schema.table format for consistency with DBT mapping
         if len(parts) == 1:
+            # For unqualified tables, we can't determine the schema
             variations.add(parts[0])
-        elif len(parts) == 2:
-            schema, table = parts
+        elif len(parts) >= 2:
+            # Always use last two parts (schema.table)
+            schema, table = parts[-2:]
             variations.add(f"{schema}.{table}")
-            variations.add(table)
-        elif len(parts) == 3:
-            database, schema, table = parts
-            variations.add(f"{database}.{schema}.{table}")
-            variations.add(f"{schema}.{table}")
-            variations.add(table)
             
         return {v.lower() for v in variations if v}
     
@@ -60,6 +54,9 @@ class SQLTableExtractor:
         # Get the real name part
         name_parts = []
         for token in identifier.tokens:
+            if token.is_whitespace:
+                # Stop at first whitespace - anything after is likely an alias
+                break
             if isinstance(token, (Identifier, Function)):
                 name_parts.append(token.value)
             elif token.ttype in (Name, Name.Placeholder) or token.value == '.':

@@ -406,6 +406,7 @@ class AIRecommendation:
     description: str
     impact: str
     suggested_sql: Optional[str] = None
+    pattern_metadata: Optional[Dict] = None  # Added field for pattern metadata
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""
@@ -413,7 +414,8 @@ class AIRecommendation:
             'type': self.type,
             'description': self.description,
             'impact': self.impact,
-            'suggested_sql': self.suggested_sql
+            'suggested_sql': self.suggested_sql,
+            'pattern_metadata': self.pattern_metadata
         }
     
     @classmethod
@@ -423,5 +425,6 @@ class AIRecommendation:
             type=data['type'],
             description=data['description'],
             impact=data['impact'],
-            suggested_sql=data.get('suggested_sql')
+            suggested_sql=data.get('suggested_sql'),
+            pattern_metadata=data.get('pattern_metadata')
         )
