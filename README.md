@@ -86,7 +86,7 @@ Filtering Options:
   --include-users TEXT       Include specific users (comma-separated)
   --exclude-users TEXT       Exclude specific users (comma-separated)
   --query-kinds TEXT         Filter by query kinds (SELECT,INSERT,etc)
-  --select-patterns TEXT     Filter specific patterns
+  --select-patterns TEXT     Filter specific patterns by pattern_id (pattern_id is getting created at the first analysis step, you can select patterns of interest                              on the next steps
   --select-tables TEXT       Filter specific tables
   --select-models TEXT       Filter specific dbt models
 
