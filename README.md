@@ -32,8 +32,8 @@ QuerySight is a powerful command-line tool that analyzes ClickHouse query patter
 
 - Python 3.10+
 - ClickHouse database instance
-- OpenAI API key (for AI-powered recommendations)
-- dbt project (optional, for dbt integration features)
+- OpenAI API key (optional, for AI-powered recommendations)
+- dbt project (recommended, for dbt integration features)
 
 ## Installation
 
