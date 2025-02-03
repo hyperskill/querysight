@@ -26,7 +26,7 @@ QuerySight is a powerful command-line tool that analyzes ClickHouse query patter
   - Intelligent caching system for faster repeated analysis
   - Batch processing for large query logs
   - Progress tracking with rich CLI interface
-  - Flexible output formats (CLI, JSON, PDF)
+  - Flexible output formats (CLI, JSON)
 
 ## Prerequisites
 
