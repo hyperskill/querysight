@@ -18,6 +18,7 @@ class AISuggester:
     """AI-powered query optimization suggester"""
     
     def __init__(self):
+        self.model = Config.LLM_MODEL
         os.environ["OPENAI_API_KEY"] = Config.OPENAI_API_KEY
         os.environ["OPENAI_MODEL"] = Config.OPENAI_MODEL
         os.environ["ANTHROPIC_API_KEY"] = Config.ANTHROPIC_API_KEY
