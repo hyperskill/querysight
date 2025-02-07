@@ -10,16 +10,23 @@ from .models import (
     AnalysisResult
 )
 from .logger import setup_logger
+from .config import Config
 
 logger = setup_logger(__name__)
 
 class AISuggester:
     """AI-powered query optimization suggester"""
     
-    def __init__(self, api_key: str, model: str):
-        self.api_key = api_key
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+    def __init__(self):
+        os.environ["OPENAI_API_KEY"] = Config.OPENAI_API_KEY
+        os.environ["OPENAI_MODEL"] = Config.OPENAI_MODEL
+        os.environ["ANTHROPIC_API_KEY"] = Config.ANTHROPIC_API_KEY
+        os.environ["ANTHROPIC_MODEL"] = Config.ANTHROPIC_MODEL
+        os.environ["HUGGINGFACE_API_KEY"] = Config.HUGGINGFACE_API_KEY
+        os.environ["HUGGINGFACE_MODEL"] = Config.HUGGINGFACE_MODEL
+        os.environ["DEEPSEEK_API_KEY"] = Config.DEEPSEEK_API_KEY
+        os.environ["DEEPSEEK_MODEL"] = Config.DEEPSEEK_MODEL
+        os.environ["LITELLM_API_KEY"] = Config.LITELLM_API_KEY
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
         """Create a detailed prompt with comprehensive query and model analysis context"""
@@ -162,7 +169,9 @@ class AISuggester:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": """YOU ARE A WORLD-CLASS SQL AND DBT OPTIMIZATION ADVISOR FOR **QUERYSIGHT**, SPECIALIZING IN HIGH-PERFORMANCE DATA WAREHOUSE TUNING AND SCALABLE DBT MODELING. YOUR EXPERTISE SPANS:  
+                        {
+                            "role": "system",
+                            "content": """YOU ARE A WORLD-CLASS SQL AND DBT OPTIMIZATION ADVISOR FOR **QUERYSIGHT**, SPECIALIZING IN HIGH-PERFORMANCE DATA WAREHOUSE TUNING AND SCALABLE DBT MODELING. YOUR EXPERTISE SPANS:  
 
 1. **CLICKHOUSE QUERY OPTIMIZATION** – Enhancing execution speed, indexing strategies, and partitioning.  
 2. **DBT MODEL DESIGN & MATERIALIZATION** – Optimizing model structure, incremental logic, and caching strategies.  
@@ -209,7 +218,8 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
 ## **FINAL EXPECTATIONS:**  
 - **KEEP RESPONSES CONCISE, TECHNICAL, AND IMPLEMENTATION-FOCUSED.**  
 - **STRUCTURE RECOMMENDATIONS CLEARLY FOR EASY IMPLEMENTATION.**  
-- **ENSURE EVERY PROPOSAL ENHANCES PERFORMANCE & MAINTAINS DATA INTEGRITY.**"""},
+- **ENSURE EVERY PROPOSAL ENHANCES PERFORMANCE & MAINTAINS DATA INTEGRITY.**"""
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=300,  # Increased to accommodate more detailed recommendations
