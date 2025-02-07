@@ -43,15 +43,7 @@ class Config:
             'CLICKHOUSE_USER': cls.CLICKHOUSE_USER,
             'CLICKHOUSE_PASSWORD': cls.CLICKHOUSE_PASSWORD,
             'CLICKHOUSE_DATABASE': cls.CLICKHOUSE_DATABASE,
-            'OPENAI_API_KEY': cls.OPENAI_API_KEY,
-            'OPENAI_MODEL': cls.OPENAI_MODEL,
-            'ANTHROPIC_API_KEY': cls.ANTHROPIC_API_KEY,
-            'ANTHROPIC_MODEL': cls.ANTHROPIC_MODEL,
-            'HUGGINGFACE_API_KEY': cls.HUGGINGFACE_API_KEY,
-            'HUGGINGFACE_MODEL': cls.HUGGINGFACE_MODEL,
-            'DEEPSEEK_API_KEY': cls.DEEPSEEK_API_KEY,
-            'DEEPSEEK_MODEL': cls.DEEPSEEK_MODEL,
-            'LITELLM_API_KEY': cls.LITELLM_API_KEY,
+            'LLM_MODEL': cls.LLM_MODEL,
             'DBT_PROJECT_PATH': cls.DBT_PROJECT_PATH
         }
         
