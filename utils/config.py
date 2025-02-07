@@ -20,10 +20,14 @@ class Config:
     CLICKHOUSE_PASSWORD: str = os.getenv('CLICKHOUSE_PASSWORD', '')
     CLICKHOUSE_DATABASE: str = os.getenv('CLICKHOUSE_DATABASE', 'default')
 
-    # OpenAI configuration
-    OPENAI_API_KEY: Optional[str] = os.getenv('OPENAI_API_KEY')
-    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
-   
+    # AI Providers
+    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
+    ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
+    HUGGINGFACE_API_KEY: Optional[str] = os.getenv("HUGGINGFACE_API_KEY")
+    DEEPSEEK_API_KEY: Optional[str] = os.getenv("DEEPSEEK_API_KEY")
+    LITELLM_API_KEY: Optional[str] = os.getenv("LITELLM_API_KEY")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4")
+
     # DBT configuration
     DBT_PROJECT_PATH: str = os.getenv('DBT_PROJECT_PATH', '')
     logger.info(f"Loaded DBT_PROJECT_PATH: {DBT_PROJECT_PATH}")
@@ -39,8 +43,7 @@ class Config:
             'CLICKHOUSE_USER': cls.CLICKHOUSE_USER,
             'CLICKHOUSE_PASSWORD': cls.CLICKHOUSE_PASSWORD,
             'CLICKHOUSE_DATABASE': cls.CLICKHOUSE_DATABASE,
-            'OPENAI_API_KEY': cls.OPENAI_API_KEY,
-            'OPENAI_MODEL': cls.OPENAI_MODEL,
+            'LLM_MODEL': cls.LLM_MODEL,
             'DBT_PROJECT_PATH': cls.DBT_PROJECT_PATH
         }
         
