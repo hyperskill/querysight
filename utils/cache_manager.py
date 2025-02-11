@@ -448,25 +448,34 @@ class QueryLogsCacheManager:
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT pattern_id, sql_pattern, frequency, total_duration_ms,
-                       users, tables_accessed, first_seen, last_seen
-                FROM query_patterns
-                WHERE cache_key = ?
-                ORDER BY frequency DESC
+                SELECT DISTINCT
+                    p.pattern_id, p.sql_pattern, p.model_name, p.frequency,
+                    p.total_duration_ms, p.avg_duration_ms, p.first_seen,
+                    p.last_seen, p.memory_usage, p.total_read_rows,
+                    p.total_read_bytes
+                FROM query_patterns p
+                WHERE p.cache_key = ?
+                ORDER BY p.frequency DESC
             """, (cache_key,))
             
             patterns = []
             for row in cursor.fetchall():
+                pattern_id = row[0]
                 pattern = QueryPattern(
-                    pattern_id=row[0],
+                    pattern_id=pattern_id,
                     sql_pattern=row[1],
-                    model_name='',  
-                    frequency=row[2],
-                    total_duration_ms=row[3],
-                    users=set(row[4].split(',')) if row[4] else set(),
-                    tables_accessed=set(row[5].split(',')) if row[5] else set(),
-                    first_seen=datetime.fromtimestamp(row[6]) if row[6] else None,
-                    last_seen=datetime.fromtimestamp(row[7]) if row[7] else None
+                    model_name=row[2],
+                    frequency=row[3],
+                    total_duration_ms=row[4],
+                    avg_duration_ms=row[5],
+                    first_seen=datetime.fromisoformat(row[6]) if row[6] else None,
+                    last_seen=datetime.fromisoformat(row[7]) if row[7] else None,
+                    memory_usage=row[8],
+                    total_read_rows=row[9],
+                    total_read_bytes=row[10],
+                    users=self._get_pattern_users(pattern_id),
+                    tables_accessed=self._get_pattern_tables(pattern_id),
+                    dbt_models_used=self._get_pattern_dbt_models(pattern_id)
                 )
                 patterns.append(pattern)
                 
