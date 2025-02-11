@@ -191,11 +191,11 @@ class AISuggester:
                     f"and MUST NOT be targets for dbt modeling or optimization. Focus optimization efforts only on user tables.\n\n"
                     f"Based on these metrics, provide ONE specific, high-impact recommendation for user tables only.\n\n"
                     f"## RESPONSE FORMAT\n"
-                    f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
-                    f"Description: [Clear, specific implementation steps]\n"
-                    f"Impact: [HIGH|MEDIUM|LOW]\n"
-                    f"SQL: [Improved query or model definition if applicable]\n"
-                    f"Implementation: [Step-by-step guide if complex changes are needed]\n"
+                    f"**Type:** [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
+                    f"**Description:** [Clear, specific implementation steps]\n"
+                    f"**Impact:** [HIGH|MEDIUM|LOW]\n"
+                    f"**SQL:**\n```sql\n[Improved query or model definition if applicable]\n```\n"
+                    f"**Implementation:**\n[Step-by-step guide if complex changes are needed]\n"
                 )
                 
                 try:
