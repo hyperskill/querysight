@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
+from litellm import completion
 import json
 import hashlib
 from datetime import datetime
@@ -199,7 +199,7 @@ class AISuggester:
                 )
                 
                 try:
-                    response = self.client.chat.completions.create(
+                    response = completion(
                         model=self.model,
                         messages=[
                             {
@@ -263,7 +263,7 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                     continue
                 
                 try:
-                    response_litellm = litellm.completion(
+                    response_litellm = completion(
                         model=self.model,
                         messages=[{"role": "system", "content": "You are a SQL optimization expert"},
                                   {"role": "user", "content": full_prompt}],
@@ -279,10 +279,30 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                 suggestion = response.choices[0].message.content.strip()
                 parts = suggestion.split('\n')
                 
-                rec_type = parts[0].split(': ')[1] if len(parts) > 0 else "UNKNOWN"
-                description = parts[1].split(': ')[1] if len(parts) > 1 else "No description provided"
-                impact = parts[2].split(': ')[1] if len(parts) > 2 else "UNKNOWN"
-                sql = parts[3].split(': ')[1] if len(parts) > 3 and 'SQL: ' in parts[3] else None
+                def extract_section(marker: str) -> str:
+                    for part in parts:
+                        part = part.strip()
+                        if part.startswith(f'**{marker}:**'):
+                            return part.split(':**')[1].strip()
+                    return 'UNKNOWN'
+                
+                def extract_sql() -> Optional[str]:
+                    sql_parts = []
+                    in_sql = False
+                    for part in parts:
+                        if '```sql' in part:
+                            in_sql = True
+                            continue
+                        elif '```' in part and in_sql:
+                            break
+                        elif in_sql:
+                            sql_parts.append(part)
+                    return '\n'.join(sql_parts) if sql_parts else None
+                
+                rec_type = extract_section('Type')
+                description = extract_section('Description')
+                impact = extract_section('Impact')
+                sql = extract_sql()
                 
                 # Create pattern metadata dictionary
                 pattern_metadata = {

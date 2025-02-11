@@ -26,6 +26,7 @@ from utils.models import (
     AnalysisResult, QueryPattern, QueryLog,
     AIRecommendation, QueryKind, QueryFocus, DBTModel
 )
+from utils.dbt_model_generator import DBTModelGenerator
 from utils.data_acquisition import ClickHouseDataAcquisition
 from utils.dbt_analyzer import DBTProjectAnalyzer
 from utils.ai_suggester import AISuggester
@@ -271,8 +272,9 @@ def cli():
     """QuerySight CLI - A tool for analyzing ClickHouse query patterns and optimizing dbt models.
 
     Available Commands:
-      analyze    Analyze query patterns and generate optimization recommendations
-      export     Export the latest analysis results to JSON format
+      analyze         Analyze query patterns and generate optimization recommendations
+      export          Export the latest analysis results to JSON format
+      generate-model  Generate a new dbt model for an uncovered table
     """
     pass
 
@@ -429,12 +431,28 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
         ai_suggester = None
         if Config.LLM_MODEL:
             ai_suggester = AISuggester()
+            
+        # Load cached patterns and analysis results
+        patterns = []
+        try:
+            # Try loading from pattern analysis first
+            cached_patterns = cache_manager.get_cached_data('pattern_analysis')
+            if cached_patterns:
+                patterns = cached_patterns
+            else:
+                # Fall back to dbt analysis cache
+                cached_analysis = cache_manager.get_cached_data('dbt_analysis')
+                if cached_analysis and 'patterns' in cached_analysis:
+                    patterns = [QueryPattern.from_dict(p) for p in cached_analysis['patterns']]
+        except Exception as e:
+            logger.warning(f"Failed to load cached patterns: {str(e)}")
         
         return {
             'data_acquisition': data_acquisition,
             'dbt_analyzer': dbt_analyzer,
             'cache_manager': cache_manager,
-            'ai_suggester': ai_suggester
+            'ai_suggester': ai_suggester,
+            'patterns': patterns
         }
         
     except Exception as e:
@@ -769,6 +787,65 @@ def export(output: Optional[str]):
             
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+@cli.command()
+@click.argument('table_name')
+@click.option('--dbt-project', required=True, help='Path to dbt project')
+@click.option('--model-type', type=click.Choice(['staging', 'intermediate', 'mart_fact', 'mart_dimension']),
+              default='staging', help='Type of model to generate')
+@click.option('--force/--no-force', default=False, help='Force overwrite if model exists')
+def generate_model(table_name: str, dbt_project: str, model_type: str, force: bool):
+    """Generate a new dbt model for an uncovered table.
+    
+    This command will:
+    1. Analyze existing query patterns for the table
+    2. Generate an appropriate dbt model with tests and documentation
+    3. Create the model file in the correct location
+    """
+    try:
+        # Initialize components
+        components = initialize_analysis_components(dbt_project)
+        generator = DBTModelGenerator(dbt_project, components['ai_suggester'])
+        
+        # Get relevant query patterns
+        patterns = [p for p in components['patterns'] if table_name in p.tables_accessed]
+        
+        if not patterns:
+            console.print(f"[yellow]Warning: No query patterns found for table {table_name}[/yellow]")
+            if not click.confirm("Continue with basic model generation?"):
+                return
+            
+        # Use the most frequent pattern if available
+        pattern = max(patterns, key=lambda p: p.frequency) if patterns else None
+        
+        # Generate model structure
+        model_structure = generator.generate_model(table_name, pattern)
+        
+        # Check if model already exists
+        model_path = Path(model_structure['path'])
+        if model_path.exists() and not force:
+            console.print(f"[red]Error: Model already exists at {model_path}[/red]")
+            console.print("Use --force to overwrite")
+            return
+            
+        # Create model files
+        generator.create_model_files(model_structure)
+        
+        # Display success message
+        console.print(f"\n[green]Successfully generated model:[/green]")
+        console.print(f"  - Model: {model_structure['name']}")
+        console.print(f"  - Path: {model_structure['path']}")
+        console.print(f"  - Type: {model_type}")
+        console.print(f"  - Materialization: {model_structure['config']['materialized']}")
+        
+        if model_structure['recommendations']:
+            console.print("\n[blue]AI Recommendations:[/blue]")
+            display_recommendations(model_structure['recommendations'])
+            
+    except Exception as e:
+        console.print(f"[red]Error generating model: {str(e)}[/red]")
+        logger.error(f"Error in generate_model: {str(e)}", exc_info=True)
         sys.exit(1)
 
 if __name__ == '__main__':
