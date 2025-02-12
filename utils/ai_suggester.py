@@ -18,7 +18,7 @@ logger = setup_logger(__name__)
 class AISuggester:
     """AI-powered query optimization suggester"""
     
-    def __init__(self):
+    def __init__(self, data_acquisition=None):
         self.model = Config.LLM_MODEL
         if hasattr(Config, 'OPENAI_API_KEY') and Config.OPENAI_API_KEY:
             os.environ["OPENAI_API_KEY"] = Config.OPENAI_API_KEY
@@ -30,6 +30,8 @@ class AISuggester:
             os.environ["DEEPSEEK_API_KEY"] = Config.DEEPSEEK_API_KEY
         if hasattr(Config, 'LITELLM_API_KEY') and Config.LITELLM_API_KEY:
             os.environ["LITELLM_API_KEY"] = Config.LITELLM_API_KEY
+            
+        self.data_acquisition = data_acquisition
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
         """Create a detailed prompt with comprehensive query and model analysis context"""
@@ -49,6 +51,16 @@ class AISuggester:
             
         # Get unmapped tables (only from user tables)
         unmapped_tables = user_tables - pattern.dbt_models_used
+        
+        # Get table schemas if data_acquisition is available
+        table_schemas = {}
+        if self.data_acquisition:
+            for table in user_tables:
+                try:
+                    schema = self.data_acquisition.get_table_schema(table)
+                    table_schemas[table] = schema
+                except Exception as e:
+                    logger.warning(f"Could not get schema for table {table}: {str(e)}")
         
         # Get model details in a structured format
         mapped_models = []
@@ -88,8 +100,27 @@ class AISuggester:
         is_long_running = pattern.avg_duration_ms > 1000
         memory_mb = pattern.memory_usage / (1024 * 1024) if pattern.memory_usage else 0
         
+        # Format table schemas for better readability
+        formatted_schemas = {}
+        for table, schema in table_schemas.items():
+            formatted_schemas[table] = {
+                'columns': [
+                    {
+                        'name': col['name'],
+                        'type': col['type'],
+                        'comment': col['comment'] if col['comment'] else None,
+                        'default': col['default_expression'] if col['default_expression'] else None
+                    }
+                    for col in schema
+                ],
+                'column_count': len(schema),
+                'has_comments': any(col['comment'] for col in schema),
+                'data_types': sorted(set(col['type'] for col in schema))
+            }
+            
         # Create enhanced JSON structure
         context = {
+            "table_schemas": formatted_schemas,
             "query_analysis": {
                 "pattern_types": pattern_types,
                 "table_classification": {
