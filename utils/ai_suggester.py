@@ -163,13 +163,31 @@ class AISuggester:
             f"2. Current dbt model coverage and relationships\n"
             f"3. Tables classification (user vs system tables)\n\n"
             f"```json\n{context_json}\n```\n\n"
-            f"## OPTIMIZATION CONSIDERATIONS\n\n"
+            f"## SCHEMA ANALYSIS\n\n"
+            f"Tables involved in this query pattern:\n"
+            + ''.join(
+                f"\n{table}:\n"
+                f"  - Columns: {formatted_schemas[table]['column_count']}\n"
+                f"  - Types: {', '.join(formatted_schemas[table]['data_types'])}\n"
+                f"  - Has column comments: {'Yes' if formatted_schemas[table]['has_comments'] else 'No'}\n"
+                for table in formatted_schemas
+            ) + "\n"
+            + f"\n## OPTIMIZATION CONSIDERATIONS\n\n"
             f"1. Performance Optimization:\n"
             f"   - Query shows {pattern.frequency} executions per day ({'high' if is_high_frequency else 'moderate/low'} frequency)\n"
             f"   - Average duration: {pattern.avg_duration_ms:.2f}ms ({'concerning' if is_long_running else 'acceptable'})\n"
             f"   - Memory usage: {memory_mb:.2f}MB\n"
             f"   - {'Includes joins with system tables' if any(table.lower().startswith(schema + '.') for table in pattern.tables_accessed for schema in ['system', 'information_schema', 'pg_catalog']) else 'No system table dependencies'}\n\n"
-            f"2. Model Coverage:\n"
+            f"2. Schema-Based Optimization:\n"
+            + ''.join(
+                f"   - {table}:\n"
+                f"     * Column count: {formatted_schemas[table]['column_count']} (consider indexing or column pruning)\n"
+                f"     * Data types: {', '.join(formatted_schemas[table]['data_types'])} (check for type-specific optimizations)\n"
+                f"     * Documentation: {'Has comments' if formatted_schemas[table]['has_comments'] else 'Missing comments'} (review for business context)\n"
+                f"     * Key columns: {', '.join(col['name'] for col in formatted_schemas[table]['columns'] if col['name'].lower().endswith('_id') or col['name'].lower() in ['id', 'key'])}\n"
+                for table in formatted_schemas
+            ) + "\n"
+            f"3. Model Coverage:\n"
             f"   - User tables: {len(user_tables)} ({len(pattern.dbt_models_used)} mapped to dbt models)\n"
             f"   - System tables: {len(system_tables)} (excluded from optimization)\n"
             f"   - Unmapped user tables: {len(unmapped_tables)}\n\n"
@@ -293,17 +311,17 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                     logger.error(f"Error generating suggestions: {str(e)}")
                     continue
                 
+                # Generate recommendations using LiteLLM
                 try:
-                    response_litellm = completion(
+                    response = completion(
                         model=self.model,
                         messages=[{"role": "system", "content": "You are a SQL optimization expert"},
                                   {"role": "user", "content": full_prompt}],
                         temperature=0.2,
                         max_tokens=2000
                     )
-                    print(f"LiteLLM Response: {response_litellm}")  # Debug logging
                 except Exception as e:
-                    print(f"AI Suggestion Failed: {str(e)}")
+                    logger.error(f"AI Suggestion Failed: {str(e)}")
                     continue
                 
                 # Parse response into structured format
@@ -311,11 +329,47 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                 parts = suggestion.split('\n')
                 
                 def extract_section(marker: str) -> str:
-                    for part in parts:
+                    print(f"\nLooking for marker: {marker}")
+                    # Find the start of the section
+                    start_idx = -1
+                    for i, part in enumerate(parts):
                         part = part.strip()
-                        if part.startswith(f'**{marker}:**'):
-                            return part.split(':**')[1].strip()
-                    return 'UNKNOWN'
+                        print(f"Checking line {i}: {part}")
+                        if f'**{marker}:**' in part or f'{marker}:' in part:
+                            start_idx = i
+                            print(f"Found marker at line {i}")
+                            break
+                    if start_idx == -1:
+                        print(f"Marker {marker} not found")
+                        return 'UNKNOWN'
+                    
+                    # Extract content until next section
+                    content = []
+                    i = start_idx
+                    current_line = parts[i].strip()
+                    
+                    # Extract content from first line
+                    if f'**{marker}:**' in current_line:
+                        content.append(current_line.split(f'**{marker}:**')[1].strip())
+                    elif f'{marker}:' in current_line:
+                        content.append(current_line.split(f'{marker}:')[1].strip())
+                    
+                    # Continue until we hit another section or code block
+                    i += 1
+                    while i < len(parts):
+                        line = parts[i].strip()
+                        if '**' in line or line.startswith('```') or ':' in line:
+                            # Check if this is actually a new section
+                            if any(f'**{m}:**' in line or f'{m}:' in line 
+                                  for m in ['Type', 'Description', 'Impact', 'SQL']):
+                                break
+                        if line:
+                            content.append(line)
+                        i += 1
+                    
+                    result = ' '.join(content)
+                    print(f"Extracted content for {marker}: {result}")
+                    return result
                 
                 def extract_sql() -> Optional[str]:
                     sql_parts = []

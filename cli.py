@@ -26,7 +26,6 @@ from utils.models import (
     AnalysisResult, QueryPattern, QueryLog,
     AIRecommendation, QueryKind, QueryFocus, DBTModel
 )
-from utils.dbt_model_generator import DBTModelGenerator
 from utils.data_acquisition import ClickHouseDataAcquisition
 from utils.dbt_analyzer import DBTProjectAnalyzer
 from utils.ai_suggester import AISuggester
@@ -430,7 +429,7 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
         # Initialize AI suggester if API key is available
         ai_suggester = None
         if Config.LLM_MODEL:
-            ai_suggester = AISuggester()
+            ai_suggester = AISuggester(data_acquisition=data_acquisition)
             
         # Load cached patterns and analysis results
         patterns = []
@@ -632,7 +631,18 @@ def execute_dbt_integration(components, patterns, progress, task):
 def execute_optimization(components, analysis_result, progress, task):
     """Execute optimization level"""
     try:
-        cache_key = f"level4_{hashlib.sha256(str(analysis_result).encode()).hexdigest()}"
+        # Generate cache key that includes schema version
+        schema_version = ""
+        try:
+            # Get schema version from one of the tables
+            if analysis_result.query_patterns and analysis_result.query_patterns[0].tables_accessed:
+                table = next(iter(analysis_result.query_patterns[0].tables_accessed))
+                schema = components['data_acquisition'].get_table_schema(table)
+                schema_version = hashlib.sha256(str(schema).encode()).hexdigest()[:8]
+        except Exception as e:
+            logger.warning(f"Could not get schema version for cache key: {str(e)}")
+            
+        cache_key = f"level4_schema_{schema_version}_{hashlib.sha256(str(analysis_result).encode()).hexdigest()}"
         
         if components.get('cache', True) and components['cache_manager'].has_valid_cache(cache_key):
             recommendations = components['cache_manager'].get_cached_data(cache_key)
@@ -726,33 +736,64 @@ def display_recommendations(recommendations: List[AIRecommendation]) -> None:
         console.print("[yellow]No optimization recommendations generated[/yellow]")
         return
 
-    console.print("\n[bold]AI Optimization Recommendations[/bold]")
+    console.print("\n[bold cyan]⚡ AI Optimization Recommendations[/bold cyan]\n")
     for i, rec in enumerate(recommendations, 1):
-        # Create metadata section if available
+        # Format impact with color and emoji
+        impact_info = {
+            'HIGH': ('red', '🔥'),
+            'MEDIUM': ('yellow', '⚠️'),
+            'LOW': ('green', '✓')
+        }.get(rec.impact, ('white', '•'))
+        
+        # Format SQL with syntax highlighting if present
+        sql_section = ""
+        if rec.suggested_sql:
+            sql_section = "\n```sql\n" + rec.suggested_sql.strip() + "\n```"
+        
+        # Format metadata if available
         metadata_section = ""
         if rec.pattern_metadata:
             metadata = rec.pattern_metadata
-            metadata_section = (
-                f"\nPattern Details:\n"
-                f"• SQL Pattern:\n[blue]{metadata['sql_pattern']}[/blue]\n"  # Add SQL pattern display
-                f"• Frequency: {metadata['frequency']} queries\n"
-                f"• Avg Duration: {metadata['avg_duration_ms']:.2f} ms\n"
-                f"• Memory Usage: {metadata['memory_usage'] / (1024*1024):.2f} MB\n"
-                f"• Tables: {', '.join(metadata['tables_accessed'][:3])}{'...' if len(metadata['tables_accessed']) > 3 else ''}\n"
-                f"• DBT Models: {', '.join(metadata['dbt_models_used'][:3])}{'...' if len(metadata['dbt_models_used']) > 3 else ''}\n"
-                f"• Complexity Score: {metadata['complexity_score']:.2f}"
+            metadata_section = Panel(
+                "\n".join([
+                    f"[bold]Query Pattern:[/bold]\n```sql\n{metadata['sql_pattern']}\n```\n",
+                    f"[bold]Statistics:[/bold]",
+                    f"• Frequency: [cyan]{metadata['frequency']}[/cyan] queries",
+                    f"• Duration: [cyan]{metadata['avg_duration_ms']:.2f}[/cyan] ms",
+                    f"• Memory: [cyan]{metadata['memory_usage'] / (1024*1024):.2f}[/cyan] MB",
+                    f"• Complexity: [cyan]{metadata['complexity_score']:.2f}[/cyan]",
+                    "\n[bold]Related Objects:[/bold]",
+                    f"• Tables: [blue]{', '.join(metadata['tables_accessed'][:3])}{'...' if len(metadata['tables_accessed']) > 3 else ''}[/blue]",
+                    f"• Models: [blue]{', '.join(metadata['dbt_models_used'][:3])}{'...' if len(metadata['dbt_models_used']) > 3 else ''}[/blue]"
+                ]),
+                title="Pattern Details",
+                border_style="blue",
+                padding=(1, 2)
             )
 
+        # Create main recommendation panel
+        main_content = [
+            f"[bold white]Type:[/bold white] [cyan]{rec.type}[/cyan]",
+            f"[bold white]Impact:[/bold white] [{impact_info[0]}]{impact_info[1]} {rec.impact}[/{impact_info[0]}]",
+            f"[bold white]Description:[/bold white]\n{rec.description}"
+        ]
+        
+        if sql_section:
+            main_content.append(f"\n[bold white]Suggested SQL:[/bold white]{sql_section}")
+        
         panel = Panel(
-            f"Type: [cyan]{rec.type}[/cyan]\n"
-            f"Impact: [{'green' if rec.impact == 'HIGH' else 'yellow' if rec.impact == 'MEDIUM' else 'red'}]{rec.impact}[/]\n"
-            f"Description: {rec.description}\n"
-            + (f"Suggested SQL:\n[blue]{rec.suggested_sql}[/blue]" if rec.suggested_sql else "")
-            + metadata_section,
-            title=f"Recommendation {i}",
-            expand=False
+            "\n\n".join(main_content),
+            title=f"[bold]Recommendation {i}[/bold]",
+            expand=True,
+            border_style="cyan",
+            padding=(1, 2)
         )
+        
+        # Print panels
         console.print(panel)
+        if metadata_section:
+            console.print(metadata_section)
+        console.print()  # Add spacing between recommendations
 
 @cli.command()
 @click.option('--output', type=click.Path(), help='Output file path (JSON)')
