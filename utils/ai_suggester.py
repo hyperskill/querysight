@@ -120,7 +120,7 @@ class AISuggester:
             
         # Create enhanced JSON structure
         context = {
-            "table_schemas": formatted_schemas,
+            "accessed_table_schemas": formatted_schemas,
             "query_analysis": {
                 "pattern_types": pattern_types,
                 "table_classification": {
@@ -194,6 +194,8 @@ class AISuggester:
             f"IMPORTANT: System tables (system.*, information_schema.*, pg_catalog.*) are part of the database engine "
             f"and MUST NOT be targets for dbt modeling or optimization. Focus optimization efforts only on user tables.\n\n"
             f"Based on these metrics, provide ONE specific, high-impact recommendation for user tables only.\n\n"
+            f"If you have unmapped user tables and know their schema, prioritize creating a new dbt model for them, code and schema documentation for schema.yml\n\n"
+            f"IMPORTANT: Don't assume existance of parent models when creating new dbt models if you don't know about them and data is not provided\n\n"
             f"## RESPONSE FORMAT\n"
             f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
             f"Description: [Clear, specific implementation steps]\n"
