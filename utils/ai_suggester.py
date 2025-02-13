@@ -197,7 +197,7 @@ class AISuggester:
             f"If you have unmapped user tables and know their schema, prioritize creating a new dbt model for them, code and schema documentation for schema.yml\n\n"
             f"IMPORTANT: Don't assume existance of parent models when creating new dbt models if you don't know about them and data is not provided\n\n"
             f"## RESPONSE FORMAT\n"
-            f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
+            f"Type: [INDEX|REWRITE_QUERY|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
             f"Description: [Clear, specific implementation steps]\n"
             f"Impact: [HIGH|MEDIUM|LOW]\n"
             f"SQL: [Improved query or model definition if applicable]\n"
