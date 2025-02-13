@@ -18,7 +18,7 @@ logger = setup_logger(__name__)
 class AISuggester:
     """AI-powered query optimization suggester"""
     
-    def __init__(self):
+    def __init__(self, data_acquisition=None):
         self.model = Config.LLM_MODEL
         if hasattr(Config, 'OPENAI_API_KEY') and Config.OPENAI_API_KEY:
             os.environ["OPENAI_API_KEY"] = Config.OPENAI_API_KEY
@@ -30,6 +30,8 @@ class AISuggester:
             os.environ["DEEPSEEK_API_KEY"] = Config.DEEPSEEK_API_KEY
         if hasattr(Config, 'LITELLM_API_KEY') and Config.LITELLM_API_KEY:
             os.environ["LITELLM_API_KEY"] = Config.LITELLM_API_KEY
+            
+        self.data_acquisition = data_acquisition
 
     def _create_prompt(self, pattern: QueryPattern, dbt_models: Dict[str, DBTModel]) -> str:
         """Create a detailed prompt with comprehensive query and model analysis context"""
@@ -49,6 +51,16 @@ class AISuggester:
             
         # Get unmapped tables (only from user tables)
         unmapped_tables = user_tables - pattern.dbt_models_used
+        
+        # Get table schemas if data_acquisition is available
+        table_schemas = {}
+        if self.data_acquisition:
+            for table in user_tables:
+                try:
+                    schema = self.data_acquisition.get_table_schema(table)
+                    table_schemas[table] = schema
+                except Exception as e:
+                    logger.warning(f"Could not get schema for table {table}: {str(e)}")
         
         # Get model details in a structured format
         mapped_models = []
@@ -88,8 +100,27 @@ class AISuggester:
         is_long_running = pattern.avg_duration_ms > 1000
         memory_mb = pattern.memory_usage / (1024 * 1024) if pattern.memory_usage else 0
         
+        # Format table schemas for better readability
+        formatted_schemas = {}
+        for table, schema in table_schemas.items():
+            formatted_schemas[table] = {
+                'columns': [
+                    {
+                        'name': col['name'],
+                        'type': col['type'],
+                        'comment': col['comment'] if col['comment'] else None,
+                        'default': col['default_expression'] if col['default_expression'] else None
+                    }
+                    for col in schema
+                ],
+                'column_count': len(schema),
+                'has_comments': any(col['comment'] for col in schema),
+                'data_types': sorted(set(col['type'] for col in schema))
+            }
+            
         # Create enhanced JSON structure
         context = {
+            "accessed_table_schemas": formatted_schemas,
             "query_analysis": {
                 "pattern_types": pattern_types,
                 "table_classification": {
@@ -132,21 +163,41 @@ class AISuggester:
             f"2. Current dbt model coverage and relationships\n"
             f"3. Tables classification (user vs system tables)\n\n"
             f"```json\n{context_json}\n```\n\n"
-            f"## OPTIMIZATION CONSIDERATIONS\n\n"
+            f"## SCHEMA ANALYSIS\n\n"
+            f"Tables involved in this query pattern:\n"
+            + ''.join(
+                f"\n{table}:\n"
+                f"  - Columns: {formatted_schemas[table]['column_count']}\n"
+                f"  - Types: {', '.join(formatted_schemas[table]['data_types'])}\n"
+                f"  - Has column comments: {'Yes' if formatted_schemas[table]['has_comments'] else 'No'}\n"
+                for table in formatted_schemas
+            ) + "\n"
+            + f"\n## OPTIMIZATION CONSIDERATIONS\n\n"
             f"1. Performance Optimization:\n"
             f"   - Query shows {pattern.frequency} executions per day ({'high' if is_high_frequency else 'moderate/low'} frequency)\n"
             f"   - Average duration: {pattern.avg_duration_ms:.2f}ms ({'concerning' if is_long_running else 'acceptable'})\n"
             f"   - Memory usage: {memory_mb:.2f}MB\n"
             f"   - {'Includes joins with system tables' if any(table.lower().startswith(schema + '.') for table in pattern.tables_accessed for schema in ['system', 'information_schema', 'pg_catalog']) else 'No system table dependencies'}\n\n"
-            f"2. Model Coverage:\n"
+            f"2. Schema-Based Optimization:\n"
+            + ''.join(
+                f"   - {table}:\n"
+                f"     * Column count: {formatted_schemas[table]['column_count']} (consider indexing or column pruning)\n"
+                f"     * Data types: {', '.join(formatted_schemas[table]['data_types'])} (check for type-specific optimizations)\n"
+                f"     * Documentation: {'Has comments' if formatted_schemas[table]['has_comments'] else 'Missing comments'} (review for business context)\n"
+                f"     * Key columns: {', '.join(col['name'] for col in formatted_schemas[table]['columns'] if col['name'].lower().endswith('_id') or col['name'].lower() in ['id', 'key'])}\n"
+                for table in formatted_schemas
+            ) + "\n"
+            f"3. Model Coverage:\n"
             f"   - User tables: {len(user_tables)} ({len(pattern.dbt_models_used)} mapped to dbt models)\n"
             f"   - System tables: {len(system_tables)} (excluded from optimization)\n"
             f"   - Unmapped user tables: {len(unmapped_tables)}\n\n"
             f"IMPORTANT: System tables (system.*, information_schema.*, pg_catalog.*) are part of the database engine "
             f"and MUST NOT be targets for dbt modeling or optimization. Focus optimization efforts only on user tables.\n\n"
             f"Based on these metrics, provide ONE specific, high-impact recommendation for user tables only.\n\n"
+            f"If you have unmapped user tables and know their schema, prioritize creating a new dbt model for them, code and schema documentation for schema.yml\n\n"
+            f"IMPORTANT: Don't assume existance of parent models when creating new dbt models if you don't know about them and data is not provided\n\n"
             f"## RESPONSE FORMAT\n"
-            f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
+            f"Type: [INDEX|REWRITE_QUERY|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
             f"Description: [Clear, specific implementation steps]\n"
             f"Impact: [HIGH|MEDIUM|LOW]\n"
             f"SQL: [Improved query or model definition if applicable]\n"
@@ -168,35 +219,6 @@ class AISuggester:
                 
                 if prompt is None:
                     continue
-                
-                full_prompt = (
-                    f"## QUERY PATTERN ANALYSIS REQUEST\n\n"
-                    f"Analyze the following query pattern and provide optimization recommendations. "
-                    f"The data below includes:\n"
-                    f"1. Comprehensive query analysis (pattern types, performance metrics, usage patterns)\n"
-                    f"2. Current dbt model coverage and relationships\n"
-                    f"3. Tables classification (user vs system tables)\n\n"
-                    f"```json\n{json.dumps({'query_analysis': {'sql_pattern': pattern.sql_pattern}}, indent=2)}\n```\n\n"
-                    f"## OPTIMIZATION CONSIDERATIONS\n\n"
-                    f"1. Performance Optimization:\n"
-                    f"   - Query shows {pattern.frequency} executions per day ({'high' if pattern.frequency > 100 else 'moderate/low'} frequency)\n"
-                    f"   - Average duration: {pattern.avg_duration_ms:.2f}ms ({'concerning' if pattern.avg_duration_ms > 1000 else 'acceptable'})\n"
-                    f"   - Memory usage: {(pattern.memory_usage / (1024 * 1024)):.2f}MB\n"
-                    f"   - {'Includes joins with system tables' if any(table.lower().startswith(schema + '.') for table in pattern.tables_accessed for schema in ['system', 'information_schema', 'pg_catalog']) else 'No system table dependencies'}\n\n"
-                    f"2. Model Coverage:\n"
-                    f"   - User tables: {len([table for table in pattern.tables_accessed if not any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog'])])} ({len(pattern.dbt_models_used)} mapped to dbt models)\n"
-                    f"   - System tables: {len([table for table in pattern.tables_accessed if any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog'])])} (excluded from optimization)\n"
-                    f"   - Unmapped user tables: {len([table for table in pattern.tables_accessed if not any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog']) and table not in pattern.dbt_models_used])}\n\n"
-                    f"IMPORTANT: System tables (system.*, information_schema.*, pg_catalog.*) are part of the database engine "
-                    f"and MUST NOT be targets for dbt modeling or optimization. Focus optimization efforts only on user tables.\n\n"
-                    f"Based on these metrics, provide ONE specific, high-impact recommendation for user tables only.\n\n"
-                    f"## RESPONSE FORMAT\n"
-                    f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
-                    f"Description: [Clear, specific implementation steps]\n"
-                    f"Impact: [HIGH|MEDIUM|LOW]\n"
-                    f"SQL: [Improved query or model definition if applicable]\n"
-                    f"Implementation: [Step-by-step guide if complex changes are needed]\n"
-                )
                 
                 try:
                     response = completion(
@@ -253,7 +275,7 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
 - **STRUCTURE RECOMMENDATIONS CLEARLY FOR EASY IMPLEMENTATION.**  
 - **ENSURE EVERY PROPOSAL ENHANCES PERFORMANCE & MAINTAINS DATA INTEGRITY.**"""
                             },
-                            {"role": "user", "content": full_prompt}
+                            {"role": "user", "content": prompt}
                         ],
                         max_tokens=300,  # Increased to accommodate more detailed recommendations
                         temperature=0.7
@@ -262,29 +284,52 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                     logger.error(f"Error generating suggestions: {str(e)}")
                     continue
                 
-                try:
-                    response_litellm = completion(
-                        model=self.model,
-                        messages=[{"role": "system", "content": "You are a SQL optimization expert"},
-                                  {"role": "user", "content": full_prompt}],
-                        temperature=0.2,
-                        max_tokens=2000
-                    )
-                    print(f"LiteLLM Response: {response_litellm}")  # Debug logging
-                except Exception as e:
-                    print(f"AI Suggestion Failed: {str(e)}")
-                    continue
-                
                 # Parse response into structured format
                 suggestion = response.choices[0].message.content.strip()
                 parts = suggestion.split('\n')
                 
                 def extract_section(marker: str) -> str:
-                    for part in parts:
+                    print(f"\nLooking for marker: {marker}")
+                    # Find the start of the section
+                    start_idx = -1
+                    for i, part in enumerate(parts):
                         part = part.strip()
-                        if part.startswith(f'**{marker}:**'):
-                            return part.split(':**')[1].strip()
-                    return 'UNKNOWN'
+                        print(f"Checking line {i}: {part}")
+                        if f'**{marker}:**' in part or f'{marker}:' in part:
+                            start_idx = i
+                            print(f"Found marker at line {i}")
+                            break
+                    if start_idx == -1:
+                        print(f"Marker {marker} not found")
+                        return 'UNKNOWN'
+                    
+                    # Extract content until next section
+                    content = []
+                    i = start_idx
+                    current_line = parts[i].strip()
+                    
+                    # Extract content from first line
+                    if f'**{marker}:**' in current_line:
+                        content.append(current_line.split(f'**{marker}:**')[1].strip())
+                    elif f'{marker}:' in current_line:
+                        content.append(current_line.split(f'{marker}:')[1].strip())
+                    
+                    # Continue until we hit another section or code block
+                    i += 1
+                    while i < len(parts):
+                        line = parts[i].strip()
+                        if '**' in line or line.startswith('```') or ':' in line:
+                            # Check if this is actually a new section
+                            if any(f'**{m}:**' in line or f'{m}:' in line 
+                                  for m in ['Type', 'Description', 'Impact', 'SQL']):
+                                break
+                        if line:
+                            content.append(line)
+                        i += 1
+                    
+                    result = ' '.join(content)
+                    print(f"Extracted content for {marker}: {result}")
+                    return result
                 
                 def extract_sql() -> Optional[str]:
                     sql_parts = []

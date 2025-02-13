@@ -239,3 +239,48 @@ class ClickHouseDataAcquisition:
             self.client.execute("SELECT 1")
         except Exception as e:
             raise Exception(f"Failed to connect to ClickHouse: {str(e)}")
+            
+    def get_table_schema(self, table_name: str) -> List[Dict[str, str]]:
+        """Get schema information for a table using DESCRIBE query
+        
+        Args:
+            table_name: Name of the table to describe (can include database name)
+            
+        Returns:
+            List of column information dictionaries with keys:
+                name: Column name
+                type: Column type
+                default_type: Default expression type
+                default_expression: Default expression
+                comment: Column comment
+                codec_expression: Compression codec
+                ttl_expression: TTL expression
+        """
+        try:
+            # If table includes database, use it, otherwise use current database
+            full_table_name = table_name if '.' in table_name else f"{self.client.database}.{table_name}"
+            
+            # Execute DESCRIBE query
+            schema = self.client.execute(
+                f"DESCRIBE TABLE {full_table_name}",
+                settings={'timeout_before_checking_execution_speed': 60}
+            )
+            
+            # Convert to list of dicts for easier handling
+            columns = []
+            for col in schema:
+                columns.append({
+                    'name': col[0],
+                    'type': col[1],
+                    'default_type': col[2],
+                    'default_expression': col[3],
+                    'comment': col[4],
+                    'codec_expression': col[5],
+                    'ttl_expression': col[6]
+                })
+            
+            return columns
+            
+        except Exception as e:
+            logger.error(f"Error getting schema for table {table_name}: {str(e)}")
+            raise
