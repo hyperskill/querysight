@@ -220,35 +220,6 @@ class AISuggester:
                 if prompt is None:
                     continue
                 
-                full_prompt = (
-                    f"## QUERY PATTERN ANALYSIS REQUEST\n\n"
-                    f"Analyze the following query pattern and provide optimization recommendations. "
-                    f"The data below includes:\n"
-                    f"1. Comprehensive query analysis (pattern types, performance metrics, usage patterns)\n"
-                    f"2. Current dbt model coverage and relationships\n"
-                    f"3. Tables classification (user vs system tables)\n\n"
-                    f"```json\n{json.dumps({'query_analysis': {'sql_pattern': pattern.sql_pattern}}, indent=2)}\n```\n\n"
-                    f"## OPTIMIZATION CONSIDERATIONS\n\n"
-                    f"1. Performance Optimization:\n"
-                    f"   - Query shows {pattern.frequency} executions per day ({'high' if pattern.frequency > 100 else 'moderate/low'} frequency)\n"
-                    f"   - Average duration: {pattern.avg_duration_ms:.2f}ms ({'concerning' if pattern.avg_duration_ms > 1000 else 'acceptable'})\n"
-                    f"   - Memory usage: {(pattern.memory_usage / (1024 * 1024)):.2f}MB\n"
-                    f"   - {'Includes joins with system tables' if any(table.lower().startswith(schema + '.') for table in pattern.tables_accessed for schema in ['system', 'information_schema', 'pg_catalog']) else 'No system table dependencies'}\n\n"
-                    f"2. Model Coverage:\n"
-                    f"   - User tables: {len([table for table in pattern.tables_accessed if not any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog'])])} ({len(pattern.dbt_models_used)} mapped to dbt models)\n"
-                    f"   - System tables: {len([table for table in pattern.tables_accessed if any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog'])])} (excluded from optimization)\n"
-                    f"   - Unmapped user tables: {len([table for table in pattern.tables_accessed if not any(table.lower().startswith(schema + '.') for schema in ['system', 'information_schema', 'pg_catalog']) and table not in pattern.dbt_models_used])}\n\n"
-                    f"IMPORTANT: System tables (system.*, information_schema.*, pg_catalog.*) are part of the database engine "
-                    f"and MUST NOT be targets for dbt modeling or optimization. Focus optimization efforts only on user tables.\n\n"
-                    f"Based on these metrics, provide ONE specific, high-impact recommendation for user tables only.\n\n"
-                    f"## RESPONSE FORMAT\n"
-                    f"Type: [INDEX|MATERIALIZATION|REWRITE|NEW_DBT_MODEL|NEW_DBT_MACRO]\n"
-                    f"Description: [Clear, specific implementation steps]\n"
-                    f"Impact: [HIGH|MEDIUM|LOW]\n"
-                    f"SQL: [Improved query or model definition if applicable]\n"
-                    f"Implementation: [Step-by-step guide if complex changes are needed]\n"
-                )
-                
                 try:
                     response = completion(
                         model=self.model,
@@ -304,26 +275,13 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
 - **STRUCTURE RECOMMENDATIONS CLEARLY FOR EASY IMPLEMENTATION.**  
 - **ENSURE EVERY PROPOSAL ENHANCES PERFORMANCE & MAINTAINS DATA INTEGRITY.**"""
                             },
-                            {"role": "user", "content": full_prompt}
+                            {"role": "user", "content": prompt}
                         ],
                         max_tokens=300,  # Increased to accommodate more detailed recommendations
                         temperature=0.7
                     )
                 except Exception as e:
                     logger.error(f"Error generating suggestions: {str(e)}")
-                    continue
-                
-                # Generate recommendations using LiteLLM
-                try:
-                    response = completion(
-                        model=self.model,
-                        messages=[{"role": "system", "content": "You are a SQL optimization expert"},
-                                  {"role": "user", "content": full_prompt}],
-                        temperature=0.2,
-                        max_tokens=2000
-                    )
-                except Exception as e:
-                    logger.error(f"AI Suggestion Failed: {str(e)}")
                     continue
                 
                 # Parse response into structured format
