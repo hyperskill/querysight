@@ -51,6 +51,7 @@ class ClickHouseDataAcquisition:
         include_users: Optional[List[str]] = None,
         exclude_users: Optional[List[str]] = None,
         query_kinds: Optional[List[QueryKind]] = None,
+        select_tables: Optional[List[str]] = None,
         sample_size: float = 1.0,
         batch_size: int = 1000,
         use_cache: bool = True
@@ -67,7 +68,7 @@ class ClickHouseDataAcquisition:
             logger.info(f"  Batch size: {batch_size}")
             logger.info(f"  Use cache: {use_cache}")
             
-            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_kinds, sample_size)
+            cache_key = self._generate_cache_key(days, focus, include_users, exclude_users, query_kinds, select_tables, sample_size)
             logger.info(f"Generated cache key: {cache_key}")
             
             if use_cache and self.cache_manager.has_valid_cache(cache_key):
@@ -82,8 +83,8 @@ class ClickHouseDataAcquisition:
             params = {}
             
             # Time range condition
-            conditions.append("event_time >= %(start_time)s")
-            params['start_time'] = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            conditions.append("event_time >= now() - INTERVAL %(days)s DAYS")
+            params['days'] = days
             
             # User filters
             if include_users:
@@ -97,6 +98,13 @@ class ClickHouseDataAcquisition:
             if query_kinds:
                 conditions.append("upper(query_kind) IN %(query_kinds)s")
                 params['query_kinds'] = tuple(qk.value.upper() for qk in query_kinds)
+            
+            # Table filter
+            if select_tables:
+                table_conditions = []
+                for table in select_tables:
+                    table_conditions.append(f"arrayExists(x -> x LIKE '{table}', `tables`)")
+                conditions.append(f"({' OR '.join(table_conditions)})") 
             
             # Build WHERE clause
             where_clause = " AND ".join(conditions) if conditions else "1"
@@ -131,14 +139,13 @@ class ClickHouseDataAcquisition:
                 WHERE {where_clause}
                 ORDER BY event_time DESC
             """
-            
             logger.info("Starting batch processing...")
             
             # Execute query in batches
             for offset in range(0, sys.maxsize, batch_size):
                 batch_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
                 logger.info(f"Executing batch with offset {offset}")
-                
+                                
                 try:
                     batch_results = self.client.execute(batch_query, params)
                     if not batch_results:
