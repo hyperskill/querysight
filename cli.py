@@ -313,7 +313,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
         components = initialize_analysis_components(dbt_project, force_reset)
         logger.info("Components initialized")
         
-        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds)
+        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds, select_tables)
         logger.info(f"Analysis parameters prepared: {params}")
         
         target_level = level.lower()
@@ -459,7 +459,7 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
         logger.error(f"Failed to initialize analysis components: {str(e)}")
         raise RuntimeError(f"Failed to initialize analysis components: {str(e)}")
 
-def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds):
+def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds, select_tables):
     """Prepare and validate analysis parameters"""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
@@ -471,6 +471,12 @@ def prepare_analysis_parameters(days, focus, include_users, exclude_users, query
     else:
         query_kinds_list = None
     
+    # Handle select tables
+    if select_tables:
+        selected_tables_list = [st.strip().lower() for st in select_tables.split(',')]
+    else:
+        selected_tables_list = None
+    
     # Handle focus - always return a single QueryFocus enum
     focus_enum = QueryFocus.ALL if not focus else QueryFocus[focus.upper()]
     
@@ -480,7 +486,8 @@ def prepare_analysis_parameters(days, focus, include_users, exclude_users, query
         'query_focus': focus_enum,
         'user_include': [u.lower() for u in include_users.split(',')] if include_users else None,
         'user_exclude': [u.lower() for u in exclude_users.split(',')] if exclude_users else None,
-        'query_kinds': query_kinds_list
+        'query_kinds': query_kinds_list,
+        'select_tables': selected_tables_list
     }
 
 def create_progress_tasks(progress, target_level):
@@ -536,7 +543,8 @@ def execute_data_collection(components, params, cache, progress, task):
                 focus=params['query_focus'],
                 include_users=params['user_include'],
                 exclude_users=params['user_exclude'],
-                query_kinds=params['query_kinds']
+                query_kinds=params['query_kinds'],
+                select_tables=params['select_tables']
             )
             
             if cache:
