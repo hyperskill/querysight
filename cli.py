@@ -86,18 +86,19 @@ def display_query_patterns(patterns: List[QueryPattern], sort_by: str = 'duratio
         table = Table(
             title=f"Query Patterns (Page {current_page}/{total_pages})",
             show_lines=True,
-            expand=True
+            expand=True,
+            width=None  # Allow table to use full width
         )
 
-        # Add columns
-        table.add_column("Pattern ID", style="cyan", no_wrap=True)
-        table.add_column("Frequency", justify="right")
-        table.add_column("Avg Duration", justify="right")
-        table.add_column("Memory (MB)", justify="right")
-        table.add_column("Users", style="blue")
-        table.add_column("Tables", style="magenta")
-        table.add_column("First Seen", style="green")
-        table.add_column("Last Seen", style="green")
+        # Add columns with improved configuration
+        table.add_column("Pattern ID", style="cyan", width=32)  # Full hash length
+        table.add_column("Frequency", justify="right", width=10)
+        table.add_column("Avg Duration", justify="right", width=15)
+        table.add_column("Memory (MB)", justify="right", width=12)
+        table.add_column("Users", style="blue", width=30)
+        table.add_column("Tables", style="magenta", width=40)
+        table.add_column("First Seen", style="green", width=20)
+        table.add_column("Last Seen", style="green", width=20)
 
         # Add rows with color coding
         for pattern in page_patterns:
@@ -109,16 +110,16 @@ def display_query_patterns(patterns: List[QueryPattern], sort_by: str = 'duratio
             )
 
             avg_memory_mb = pattern.memory_usage / (1024 * 1024) if pattern.memory_usage else 0
-            users_display = (", ".join(sorted(pattern.users)[:3]) + "...") if len(pattern.users) > 3 else ", ".join(pattern.users)
-            tables_display = (", ".join(sorted(pattern.tables_accessed)[:3]) + "...") if len(pattern.tables_accessed) > 3 else ", ".join(pattern.tables_accessed)
+            users_display = "\n".join(sorted(pattern.users)) if pattern.users else "N/A"
+            tables_display = "\n".join(sorted(pattern.tables_accessed)) if pattern.tables_accessed else "N/A"
 
             table.add_row(
-                pattern.pattern_id[:12] + "...",
+                pattern.pattern_id,  # Show full pattern ID
                 str(pattern.frequency),
                 Text(f"{pattern.avg_duration_ms:,.2f} ms", style=duration_style),
                 f"{avg_memory_mb:,.2f}",
-                users_display or "N/A",
-                tables_display or "N/A",
+                users_display,
+                tables_display,
                 pattern.first_seen.strftime("%Y-%m-%d %H:%M") if pattern.first_seen else "N/A",
                 pattern.last_seen.strftime("%Y-%m-%d %H:%M") if pattern.last_seen else "N/A"
             )
@@ -312,7 +313,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
         components = initialize_analysis_components(dbt_project, force_reset)
         logger.info("Components initialized")
         
-        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds)
+        params = prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds, select_tables)
         logger.info(f"Analysis parameters prepared: {params}")
         
         target_level = level.lower()
@@ -325,7 +326,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
             # Data Collection Phase
             query_logs = execute_data_collection(components, params, cache, progress, tasks['data_collection'])
             if target_level == AnalysisLevel.DATA_COLLECTION.value:
-                display_analysis_results(None, [], [], target_level)
+                display_analysis_results(None, [], [], target_level, sort_by=sort_by, page_size=page_size)
                 return
             
             # Pattern Analysis Phase is required for all levels beyond data_collection
@@ -361,7 +362,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
                     return
             
             if target_level == AnalysisLevel.PATTERN_ANALYSIS.value:
-                display_analysis_results(None, patterns, [], target_level)
+                display_analysis_results(None, patterns, [], target_level, sort_by=sort_by, page_size=page_size)
                 return
                 
             # Filter patterns if specified
@@ -379,7 +380,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
                     tasks.get('dbt_integration', tasks['data_collection'])
                 )
                 if target_level == AnalysisLevel.DBT_INTEGRATION.value:
-                    display_analysis_results(analysis_result, patterns, [], target_level)
+                    display_analysis_results(analysis_result, patterns, [], target_level, sort_by=sort_by, page_size=page_size)
                     return
                     
             # Filter models if specified
@@ -398,7 +399,7 @@ def analyze(days, focus, min_frequency, min_duration, sample_size, batch_size, i
             # Optimization Phase
             if target_level >= AnalysisLevel.OPTIMIZATION.value:
                 recommendations = execute_optimization(components, analysis_result, progress, tasks.get('optimization', tasks['data_collection']))
-                display_analysis_results(analysis_result, patterns, recommendations, target_level)
+                display_analysis_results(analysis_result, patterns, recommendations, target_level, sort_by=sort_by, page_size=page_size)
             
     except Exception as e:
         logger.error(f"Analysis failed: {str(e)}", exc_info=True)
@@ -458,7 +459,7 @@ def initialize_analysis_components(dbt_project_path: Optional[str] = None, force
         logger.error(f"Failed to initialize analysis components: {str(e)}")
         raise RuntimeError(f"Failed to initialize analysis components: {str(e)}")
 
-def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds):
+def prepare_analysis_parameters(days, focus, include_users, exclude_users, query_kinds, select_tables):
     """Prepare and validate analysis parameters"""
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
@@ -470,6 +471,12 @@ def prepare_analysis_parameters(days, focus, include_users, exclude_users, query
     else:
         query_kinds_list = None
     
+    # Handle select tables
+    if select_tables:
+        selected_tables_list = [st.strip().lower() for st in select_tables.split(',')]
+    else:
+        selected_tables_list = None
+    
     # Handle focus - always return a single QueryFocus enum
     focus_enum = QueryFocus.ALL if not focus else QueryFocus[focus.upper()]
     
@@ -479,7 +486,8 @@ def prepare_analysis_parameters(days, focus, include_users, exclude_users, query
         'query_focus': focus_enum,
         'user_include': [u.lower() for u in include_users.split(',')] if include_users else None,
         'user_exclude': [u.lower() for u in exclude_users.split(',')] if exclude_users else None,
-        'query_kinds': query_kinds_list
+        'query_kinds': query_kinds_list,
+        'select_tables': selected_tables_list
     }
 
 def create_progress_tasks(progress, target_level):
@@ -535,7 +543,8 @@ def execute_data_collection(components, params, cache, progress, task):
                 focus=params['query_focus'],
                 include_users=params['user_include'],
                 exclude_users=params['user_exclude'],
-                query_kinds=params['query_kinds']
+                query_kinds=params['query_kinds'],
+                select_tables=params['select_tables']
             )
             
             if cache:
@@ -667,7 +676,7 @@ def execute_optimization(components, analysis_result, progress, task):
         logger.error(f"Optimization analysis failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"Optimization analysis failed: {str(e)}")
 
-def display_analysis_results(analysis_result, patterns, recommendations, level):
+def display_analysis_results(analysis_result, patterns, recommendations, level, sort_by='duration', page_size=20):
     """Display analysis results based on the level"""
     try:
         if level == AnalysisLevel.DATA_COLLECTION.value:
@@ -684,6 +693,14 @@ def display_analysis_results(analysis_result, patterns, recommendations, level):
             table.add_column("Avg Duration (ms)", justify="right")
             table.add_column("Memory Usage (MB)", justify="right")
             table.add_column("Tables", style="cyan")
+            
+            # Sort patterns according to user preference
+            if sort_by == 'frequency':
+                patterns.sort(key=lambda p: p.frequency, reverse=True)
+            elif sort_by == 'duration':
+                patterns.sort(key=lambda p: p.avg_duration_ms, reverse=True)
+            elif sort_by == 'memory':
+                patterns.sort(key=lambda p: p.memory_usage / (1024*1024), reverse=True)
             
             for pattern in patterns:
                 table.add_row(
@@ -707,7 +724,7 @@ def display_analysis_results(analysis_result, patterns, recommendations, level):
         # Always show patterns if we have them
         if patterns:
             console.print("\n[bold]Query Pattern Analysis[/bold]")
-            display_query_patterns(patterns, sort_by='duration', page_size=20)
+            display_query_patterns(patterns, sort_by=sort_by, page_size=page_size)
         else:
             console.print("\n[yellow]No query patterns found[/yellow]")
         
