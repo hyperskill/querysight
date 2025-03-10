@@ -47,18 +47,9 @@ class DBTProjectAnalyzer:
             
             # Create analysis result
             result = AnalysisResult(
-                timestamp=datetime.now(),
-                query_patterns=[],  # Will be populated later
                 dbt_models=self.models,
                 dbt_mapper=self.mapper,
-                uncovered_tables=set(),
-                model_coverage={
-                    "covered": 0.0,
-                    "uncovered": 0.0,
-                    "total_models": len(self.models),
-                    "used_models": [],
-                    "unused_models": list(self.models.keys())
-                }
+                query_patterns=[]  # Will be populated later
             )
             
             logger.info(f"Project analysis complete. Found {len(self.models)} models")
@@ -71,18 +62,9 @@ class DBTProjectAnalyzer:
     def _create_empty_result(self) -> AnalysisResult:
         """Create an empty analysis result with proper structure"""
         return AnalysisResult(
-            timestamp=datetime.now(),
-            query_patterns=[],
             dbt_models={},
-            dbt_mapper=self.mapper,  # Keep mapper for potential retries
-            uncovered_tables=set(),
-            model_coverage={
-                "covered": 0.0,
-                "uncovered": 0.0,
-                "total_models": 0,
-                "used_models": [],
-                "unused_models": []
-            }
+            dbt_mapper=self.mapper,
+            query_patterns=[]
         )
     
     def get_model_name(self, table_name: str) -> Optional[str]:
@@ -200,7 +182,7 @@ class DBTProjectAnalyzer:
             self._extract_columns(model_name, content)
     
     def _analyze_dependencies(self) -> None:
-        """Analyze dependencies between models"""
+        """Analyze dependencies between models with enhanced relationship tracking"""
         for model_name, model in self.models.items():
             model_info = self.mapper.get_model_info(model_name)
             if not model_info:
@@ -228,6 +210,25 @@ class DBTProjectAnalyzer:
                     
             except Exception as e:
                 logger.error(f"Error analyzing dependencies for {model_name}: {str(e)}")
+        
+        # After mapping all direct dependencies, calculate extended metrics
+        self._calculate_dependency_metrics()
+    
+    def _calculate_dependency_metrics(self) -> None:
+        """Calculate and store additional dependency metrics for each model"""
+        # Pre-calculate dependency depth for all models
+        for model_name, model in self.models.items():
+            # Store dependency depth
+            depth = model.dependency_depth(self.models)
+            setattr(model, '_dependency_depth', depth)
+            
+            # Identify critical models (those with many downstream dependents)
+            descendants = model.get_all_descendants(self.models)
+            impact_score = len(descendants)
+            setattr(model, '_impact_score', impact_score)
+            
+        # Log metrics for debugging
+        logger.debug(f"Calculated dependency metrics for {len(self.models)} models")
     
     def _extract_columns(self, model_name: str, content: str) -> None:
         """

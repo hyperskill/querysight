@@ -62,17 +62,32 @@ class AISuggester:
                 except Exception as e:
                     logger.warning(f"Could not get schema for table {table}: {str(e)}")
         
-        # Get model details in a structured format
+        # Get model details with enhanced dependency context
         mapped_models = []
         for model_name in pattern.dbt_models_used:
             model = dbt_models.get(model_name)
             if model:
+                # Get all descendants to understand downstream impact
+                descendants = model.get_all_descendants(dbt_models)
+                ancestors = model.get_all_ancestors(dbt_models)
+                depth = model.dependency_depth(dbt_models)
+                
                 mapped_models.append({
                     "name": model_name,
                     "materialization": model.materialization,
-                    "dependencies": list(model.depends_on),
-                    "referenced_by": list(model.referenced_by)
+                    "direct_dependencies": list(model.depends_on),
+                    "direct_dependents": list(model.referenced_by),
+                    "dependency_depth": depth,
+                    "ancestry_depth": len(ancestors),
+                    "descendant_count": len(descendants),
+                    "critical_path": len(descendants) > 3  # Arbitrary threshold
                 })
+        
+        # Sort models by criticality for better recommendations
+        mapped_models.sort(
+            key=lambda x: (x.get("critical_path", False), x.get("descendant_count", 0)), 
+            reverse=True
+        )
         
         # Enhanced pattern type detection
         sql_lower = pattern.sql_pattern.lower()
@@ -148,7 +163,11 @@ class AISuggester:
                 "mapped_models": mapped_models,
                 "unmapped_tables": list(unmapped_tables),  # Only user tables
                 "total_user_tables": len(user_tables),
-                "mapping_coverage": len(pattern.dbt_models_used) / len(user_tables) if user_tables else 0
+                "mapping_coverage": len(pattern.dbt_models_used) / len(user_tables) if user_tables else 0,
+                "dependency_insights": {
+                    "max_depth": max([m.get("dependency_depth", 0) for m in mapped_models]) if mapped_models else 0,
+                    "has_critical_models": any(m.get("critical_path", False) for m in mapped_models)
+                }
             }
         }
         

@@ -221,9 +221,91 @@ class DBTModel:
     def add_reference(self, model_name: str) -> None:
         self.referenced_by.add(model_name)
 
+    def get_all_ancestors(self, dbt_models: Dict[str, 'DBTModel'], max_depth: int = None) -> Set[str]:
+        """
+        Get all ancestor models (upstream dependencies) recursively.
+        
+        Args:
+            dbt_models: Dictionary of all DBT models
+            max_depth: Maximum depth to traverse (None for unlimited)
+            
+        Returns:
+            Set of model names that are ancestors
+        """
+        if not self.depends_on:
+            return set()
+            
+        all_ancestors = set(self.depends_on)
+        if max_depth is not None and max_depth <= 1:
+            return all_ancestors
+            
+        for dep_name in self.depends_on:
+            dep_model = dbt_models.get(dep_name)
+            if dep_model:
+                next_depth = None if max_depth is None else max_depth - 1
+                ancestors = dep_model.get_all_ancestors(dbt_models, next_depth)
+                all_ancestors.update(ancestors)
+                
+        return all_ancestors
+
+    def get_all_descendants(self, dbt_models: Dict[str, 'DBTModel'], max_depth: int = None) -> Set[str]:
+        """
+        Get all descendant models (downstream) recursively.
+        
+        Args:
+            dbt_models: Dictionary of all DBT models
+            max_depth: Maximum depth to traverse (None for unlimited)
+            
+        Returns:
+            Set of model names that are descendants
+        """
+        if not self.referenced_by:
+            return set()
+            
+        all_descendants = set(self.referenced_by)
+        if max_depth is not None and max_depth <= 1:
+            return all_descendants
+            
+        for ref_name in self.referenced_by:
+            ref_model = dbt_models.get(ref_name)
+            if ref_model:
+                next_depth = None if max_depth is None else max_depth - 1
+                descendants = ref_model.get_all_descendants(dbt_models, next_depth)
+                all_descendants.update(descendants)
+                
+        return all_descendants
+
+    def dependency_depth(self, dbt_models: Dict[str, 'DBTModel']) -> int:
+        """
+        Calculate dependency depth from source (how many steps from raw data).
+        Higher is further from source data.
+        
+        Args:
+            dbt_models: Dictionary of all DBT models
+            
+        Returns:
+            Depth from source (0 for source tables)
+        """
+        # Source tables (no dependencies or only source dependencies)
+        if not self.depends_on or all('.' in dep for dep in self.depends_on):
+            return 0
+            
+        # Calculate max depth of dependencies + 1
+        max_dep_depth = 0
+        for dep_name in self.depends_on:
+            if '.' in dep_name:  # Skip source references
+                continue
+                
+            dep_model = dbt_models.get(dep_name)
+            if dep_model:
+                dep_depth = dep_model.dependency_depth(dbt_models)
+                max_dep_depth = max(max_dep_depth, dep_depth)
+                
+        return max_dep_depth + 1
+
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""
-        return {
+        result = {
             'name': self.name,
             'path': self.path,
             'depends_on': list(self.depends_on),
@@ -233,6 +315,14 @@ class DBTModel:
             'materialization': self.materialization,
             'freshness': self.freshness.total_seconds() if self.freshness else None
         }
+        
+        # Add new fields only if they're precomputed
+        if hasattr(self, '_dependency_depth'):
+            result['dependency_depth'] = self._dependency_depth
+        if hasattr(self, '_impact_score'):
+            result['impact_score'] = self._impact_score
+            
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'DBTModel':
@@ -300,8 +390,18 @@ class AnalysisResult:
     model_coverage: Dict[str, float] = field(default_factory=dict)
     dbt_mapper: Optional[DBTModelMapper] = None
     
+    def __init__(self, dbt_models: Dict[str, DBTModel], 
+                 dbt_mapper: Optional[DBTModelMapper] = None,
+                 query_patterns: List[QueryPattern] = None):
+        self.dbt_models = dbt_models
+        self.dbt_mapper = dbt_mapper
+        self.query_patterns = query_patterns or []
+        self.model_coverage = None
+        self.uncovered_tables = set()
+        self.serialization_version = 2  # Increment when changing serialization format
+
     def calculate_coverage(self) -> None:
-        """Calculate coverage metrics with improved table matching."""
+        """Calculate coverage metrics with enhanced dependency insights."""
         if not self.dbt_mapper:
             logger.warning("No dbt mapper available, coverage calculation may be incomplete")
             return
@@ -358,18 +458,193 @@ class AnalysisResult:
         covered_models = len(used_models)
         uncovered_models = all_dbt_models - used_models
         
-        self.model_coverage = {
-            "covered": (covered_models / total_models * 100) if total_models > 0 else 0.0,
-            "uncovered": (len(uncovered_models) / total_models * 100) if total_models > 0 else 0.0,
-            "total_models": total_models,
-            "used_models": sorted(list(used_models)),  # Sort for consistent output
-            "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output,
-            "source_refs": sorted(list(self.dbt_mapper.source_refs.keys())) if self.dbt_mapper else []
-        }
+        # Calculate dependency metrics
+        if self.dbt_models:
+            # Precompute dependency metrics for each model
+            model_metrics = {}
+            for name, model in self.dbt_models.items():
+                depth = model.dependency_depth(self.dbt_models)
+                descendants = model.get_all_descendants(self.dbt_models)
+                impact_score = len(descendants) + sum(
+                    1 for p in self.query_patterns 
+                    if name in p.dbt_models_used
+                )
+                
+                # Store the metrics
+                model_metrics[name] = {
+                    "depth": depth,
+                    "impact_score": impact_score,
+                    "descendant_count": len(descendants),
+                    "is_used": name in used_models
+                }
+                
+                # Cache on model object for serialization
+                model._dependency_depth = depth
+                model._impact_score = impact_score
+            
+            # Find critical models (high impact, used)
+            critical_models = [
+                {
+                    "model": name,
+                    "impact_score": metrics["impact_score"],
+                    "descendant_count": metrics["descendant_count"],
+                    "depth": metrics["depth"]
+                }
+                for name, metrics in model_metrics.items()
+                if metrics["is_used"] and metrics["impact_score"] > 3  # Arbitrary threshold
+            ]
+            
+            # Sort by impact score
+            critical_models.sort(key=lambda x: x["impact_score"], reverse=True)
+            
+            # Find bottleneck models
+            bottleneck_models = [
+                {
+                    "model": name,
+                    "upstream_count": len(self.dbt_models[name].depends_on),
+                    "downstream_count": len(self.dbt_models[name].referenced_by),
+                    "is_used": metrics["is_used"]
+                }
+                for name, metrics in model_metrics.items()
+                if len(self.dbt_models[name].depends_on) > 1 
+                and len(self.dbt_models[name].referenced_by) > 1
+            ]
+            
+            # Sort by combined upstream and downstream count
+            bottleneck_models.sort(
+                key=lambda x: x["upstream_count"] + x["downstream_count"], 
+                reverse=True
+            )
+            
+            # Calculate dependency metrics
+            dependency_metrics = {
+                "max_depth": max(m["depth"] for m in model_metrics.values()) if model_metrics else 0,
+                "avg_depth": sum(m["depth"] for m in model_metrics.values()) / len(model_metrics) if model_metrics else 0,
+                "critical_models": critical_models[:5],  # Top 5
+                "bottleneck_models": bottleneck_models[:5]  # Top 5
+            }
+            
+            # Update coverage dictionary
+            self.model_coverage = {
+                "covered": (covered_models / total_models * 100) if total_models > 0 else 0.0,
+                "uncovered": (len(uncovered_models) / total_models * 100) if total_models > 0 else 0.0,
+                "total_models": total_models,
+                "used_models": sorted(list(used_models)),  # Sort for consistent output
+                "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output,
+                "source_refs": sorted(list(self.dbt_mapper.source_refs.keys())) if self.dbt_mapper else [],
+                "dependency_metrics": dependency_metrics
+            }
+        else:
+            # Original coverage dictionary without dependency metrics
+            self.model_coverage = {
+                "covered": (covered_models / total_models * 100) if total_models > 0 else 0.0,
+                "uncovered": (len(uncovered_models) / total_models * 100) if total_models > 0 else 0.0,
+                "total_models": total_models,
+                "used_models": sorted(list(used_models)),  # Sort for consistent output
+                "unused_models": sorted(list(uncovered_models)),  # Sort for consistent output,
+                "source_refs": sorted(list(self.dbt_mapper.source_refs.keys())) if self.dbt_mapper else []
+            }
         
         logger.info(f"Coverage calculation complete: {covered_models}/{total_models} models used")
         if self.uncovered_tables:
             logger.info(f"Found {len(self.uncovered_tables)} uncovered tables")
+
+    def get_dependency_context(self, model_name: str) -> Dict[str, any]:
+        """
+        Get comprehensive dependency context for a specific model.
+        
+        This information can be used by the AI suggester to provide more
+        targeted recommendations regarding model dependencies.
+        
+        Args:
+            model_name: Name of the model to analyze
+            
+        Returns:
+            Dictionary with dependency context
+        """
+        if model_name not in self.dbt_models:
+            return {
+                "model": model_name,
+                "found": False,
+                "error": "Model not found"
+            }
+            
+        model = self.dbt_models[model_name]
+        
+        # Get direct dependencies
+        direct_deps = set(model.depends_on)
+        direct_refs = set(model.referenced_by)
+        
+        # Get all ancestors and descendants
+        all_ancestors = model.get_all_ancestors(self.dbt_models)
+        all_descendants = model.get_all_descendants(self.dbt_models)
+        
+        # Get depth metrics
+        depth = model.dependency_depth(self.dbt_models)
+        
+        # Get query patterns that use this model
+        patterns_using_model = [
+            p.pattern_id for p in self.query_patterns 
+            if model_name in p.dbt_models_used
+        ]
+        
+        # Calculate criticality score (higher = more critical)
+        criticality = len(all_descendants) + len(patterns_using_model)
+        
+        return {
+            "model": model_name,
+            "found": True,
+            "depth": depth,
+            "direct_dependencies": sorted(list(direct_deps)),
+            "direct_dependents": sorted(list(direct_refs)),
+            "all_ancestors": sorted(list(all_ancestors)),
+            "all_descendants": sorted(list(all_descendants)),
+            "patterns_using_model": patterns_using_model,
+            "criticality_score": criticality,
+            "materialization": model.materialization
+        }
+        
+    def get_critical_path(self, source_model: str, target_model: str) -> List[str]:
+        """
+        Find the dependency path between source and target models.
+        
+        Args:
+            source_model: Starting model name
+            target_model: Ending model name
+            
+        Returns:
+            List of model names forming the path, or empty list if no path exists
+        """
+        if source_model not in self.dbt_models or target_model not in self.dbt_models:
+            return []
+            
+        # Use breadth-first search to find shortest path
+        visited = {source_model}
+        queue = [(source_model, [source_model])]
+        
+        while queue:
+            current, path = queue.pop(0)
+            
+            # Check if we've reached target
+            if current == target_model:
+                return path
+                
+            # Add unvisited neighbors
+            model = self.dbt_models.get(current)
+            if model:
+                # Check upstream dependencies
+                for dep in model.depends_on:
+                    if dep not in visited and dep in self.dbt_models:
+                        visited.add(dep)
+                        queue.append((dep, path + [dep]))
+                        
+                # Check downstream dependents
+                for ref in model.referenced_by:
+                    if ref not in visited and ref in self.dbt_models:
+                        visited.add(ref)
+                        queue.append((ref, path + [ref]))
+                        
+        return []  # No path found
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""

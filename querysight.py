@@ -165,7 +165,7 @@ def display_query_patterns(patterns: List[QueryPattern], sort_by: str = 'duratio
     console.print(stats_table)
 
 def display_model_coverage(result: AnalysisResult):
-    """Display dbt model coverage metrics with hierarchical relationships"""
+    """Display dbt model coverage metrics with enhanced dependency insights"""
     if not result or not result.query_patterns:
         console.print("[yellow]No query patterns available[/yellow]")
         return
@@ -198,14 +198,61 @@ def display_model_coverage(result: AnalysisResult):
         for pattern in patterns_no_tables:
             display_pattern_coverage(pattern, result)
             console.print()  # Add spacing between patterns
-
-    # Display uncovered tables summary at the end
-    if result.uncovered_tables:
-        console.print("\n[bold yellow]Uncovered Tables Summary[/bold yellow]")
-        console.print(", ".join(sorted(result.uncovered_tables)))
+    
+    # Add dependency metrics display
+    if result.model_coverage and result.model_coverage.get("dependency_metrics"):
+        console.print("\n[bold blue]Dependency Analysis[/bold blue]")
+        
+        metrics = result.model_coverage["dependency_metrics"]
+        metrics_table = Table(show_header=True, box=box.SIMPLE)
+        metrics_table.add_column("Metric", style="bold green")
+        metrics_table.add_column("Value")
+        
+        metrics_table.add_row("Max Dependency Depth", str(metrics["max_depth"]))
+        metrics_table.add_row("Avg Dependency Depth", f"{metrics['avg_depth']:.2f}")
+        
+        console.print(metrics_table)
+        
+        # Display critical models
+        if metrics.get("critical_models"):
+            console.print("\n[bold yellow]Critical Models (High Impact)[/bold yellow]")
+            critical_table = Table(show_header=True, box=box.SIMPLE)
+            critical_table.add_column("Model", style="bold")
+            critical_table.add_column("Impact Score")
+            critical_table.add_column("Dependent Models")
+            critical_table.add_column("Depth")
+            
+            for model in metrics["critical_models"]:
+                critical_table.add_row(
+                    model["model"],
+                    str(model["impact_score"]),
+                    str(model["descendant_count"]),
+                    str(model["depth"])
+                )
+            
+            console.print(critical_table)
+        
+        # Display bottleneck models
+        if metrics.get("bottleneck_models"):
+            console.print("\n[bold red]Bottleneck Models[/bold red]")
+            bottleneck_table = Table(show_header=True, box=box.SIMPLE)
+            bottleneck_table.add_column("Model", style="bold")
+            bottleneck_table.add_column("Upstream Count")
+            bottleneck_table.add_column("Downstream Count")
+            bottleneck_table.add_column("Status")
+            
+            for model in metrics["bottleneck_models"]:
+                bottleneck_table.add_row(
+                    model["model"],
+                    str(model["upstream_count"]),
+                    str(model["downstream_count"]),
+                    "[green]Used[/green]" if model["is_used"] else "[yellow]Unused[/yellow]"
+                )
+            
+            console.print(bottleneck_table)
 
 def display_pattern_coverage(pattern: QueryPattern, result: AnalysisResult):
-    """Display coverage information for a single pattern"""
+    """Display coverage information for a single pattern with enhanced dependency context"""
     pattern_table = Table(show_header=False, box=box.ROUNDED)
     pattern_table.add_column("Property", style="bold blue")
     pattern_table.add_column("Value")
@@ -215,19 +262,32 @@ def display_pattern_coverage(pattern: QueryPattern, result: AnalysisResult):
     pattern_table.add_row("Avg Duration", f"{pattern.avg_duration_ms:.2f}ms")
     pattern_table.add_row("SQL Pattern", pattern.sql_pattern)
     
-    # Create nested table for model relationships
+    # Create enhanced table for model relationships with dependency metrics
     models_table = Table(show_header=True, box=box.SIMPLE)
-    models_table.add_column("Model Type", style="bold green")
-    models_table.add_column("Models")
+    models_table.add_column("Model Name", style="bold green")
+    models_table.add_column("Type")
+    models_table.add_column("Materialization")
+    models_table.add_column("Depth")
+    models_table.add_column("Dependents")
     
-    # Add directly used models
+    # Process direct models with enhanced dependency metrics
     if pattern.dbt_models_used:
-        models_table.add_row(
-            "Direct Models",
-            ", ".join(sorted(pattern.dbt_models_used))
-        )
+        for model_name in sorted(pattern.dbt_models_used):
+            model = result.dbt_models.get(model_name)
+            if model:
+                # Calculate depth and impact metrics
+                depth = model.dependency_depth(result.dbt_models)
+                descendants = model.get_all_descendants(result.dbt_models)
+                
+                models_table.add_row(
+                    model_name,
+                    "Direct",
+                    model.materialization,
+                    str(depth),
+                    str(len(descendants))
+                )
         
-        # Collect all parent and child models
+        # Collect all parent and child models with metrics
         all_parents = set()
         all_children = set()
         for model_name in pattern.dbt_models_used:
@@ -240,31 +300,61 @@ def display_pattern_coverage(pattern: QueryPattern, result: AnalysisResult):
         all_parents -= pattern.dbt_models_used
         all_children -= pattern.dbt_models_used
         
-        # Add parent models if any
-        if all_parents:
-            models_table.add_row(
-                "Parent Models",
-                ", ".join(sorted(all_parents))
-            )
+        # Add parent models with metrics
+        for parent_name in sorted(all_parents):
+            parent = result.dbt_models.get(parent_name)
+            if parent:
+                depth = parent.dependency_depth(result.dbt_models)
+                descendants = parent.get_all_descendants(result.dbt_models)
+                
+                models_table.add_row(
+                    parent_name,
+                    "Parent",
+                    parent.materialization,
+                    str(depth),
+                    str(len(descendants))
+                )
         
-        # Add child models if any
-        if all_children:
-            models_table.add_row(
-                "Child Models",
-                ", ".join(sorted(all_children))
-            )
+        # Add child models with metrics
+        for child_name in sorted(all_children):
+            child = result.dbt_models.get(child_name)
+            if child:
+                depth = child.dependency_depth(result.dbt_models)
+                descendants = child.get_all_descendants(result.dbt_models)
+                
+                models_table.add_row(
+                    child_name,
+                    "Child",
+                    child.materialization,
+                    str(depth),
+                    str(len(descendants))
+                )
     
     # Add tables that couldn't be mapped to models
-    unmapped_tables = pattern.tables_accessed - {
-        model_name for model_name in pattern.dbt_models_used
-    }
+    unmapped_tables = pattern.tables_accessed - set(pattern.dbt_models_used)
     if unmapped_tables:
-        models_table.add_row(
-            "Unmapped Tables",
-            ", ".join(sorted(unmapped_tables))
-        )
+        for table in sorted(unmapped_tables):
+            models_table.add_row(
+                table,
+                "Unmapped",
+                "",
+                "",
+                ""
+            )
     
     pattern_table.add_row("Model Coverage", models_table)
+    
+    # Add critical path information if available
+    if len(pattern.dbt_models_used) >= 2:
+        models_list = sorted(list(pattern.dbt_models_used))
+        source_model = models_list[0]  # First model
+        target_model = models_list[-1]  # Last model
+        
+        critical_path = result.get_critical_path(source_model, target_model)
+        if len(critical_path) > 2:  # Only show if there's a path with intermediate steps
+            path_text = " → ".join(critical_path)
+            pattern_table.add_row("Critical Path", path_text)
+    
     console.print(pattern_table)
 
 @click.group()
