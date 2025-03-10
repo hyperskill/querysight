@@ -1,6 +1,6 @@
 # QuerySight: ClickHouse Log-Driven dbt Project Enhancer
 
-QuerySight is a powerful command-line tool that analyzes ClickHouse query patterns and provides intelligent optimization recommendations for dbt projects. By analyzing query logs and integrating with your dbt project, it helps identify optimization opportunities and improve query performance.
+QuerySight helps optimize dbt projects by analyzing ClickHouse query logs, identifying inefficiencies, and suggesting improvements. By analyzing query logs and integrating with your dbt project, it helps identify optimization opportunities and improve query performance.
 
 ## Key Features
 
@@ -45,6 +45,8 @@ cd querysight
 
 2. Install dependencies:
 ```bash
+python -m venv venv
+source venv/bin/activate  # (or `venv\Scripts\activate` on Windows)
 pip install -r requirements.txt
 ```
 
@@ -60,7 +62,7 @@ CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your_password
 CLICKHOUSE_DATABASE=default
 
-# OpenAI Configuration
+# OpenAI API Key (optional, only needed for AI-powered suggestions)
 OPENAI_API_KEY=your_openai_key
 
 # Optional dbt Configuration
