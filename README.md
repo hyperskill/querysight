@@ -55,7 +55,7 @@ pip install -r requirements.txt
 Create a `.env` file with your configuration (or copy from `.env.example`):
 
 ```bash
-# ClickHouse Connection
+# ClickHouse Connection, QuerySight needs read-only permissions for system schema and users schemas
 CLICKHOUSE_HOST=localhost
 CLICKHOUSE_PORT=9000
 CLICKHOUSE_USER=default
