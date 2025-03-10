@@ -72,7 +72,7 @@ DBT_PROJECT_PATH=/path/to/dbt/project
 ### Analysis Command
 
 ```bash
-python cli.py analyze [OPTIONS]
+python querysight.py analyze [OPTIONS]
 
 Analysis Options:
   --days INTEGER              Analysis timeframe [default: 7]
@@ -108,7 +108,7 @@ Analysis Level:
 Export analysis results to JSON format:
 
 ```bash
-python cli.py export [OPTIONS]
+python querysight.py export [OPTIONS]
   --output TEXT    Output file path [default: stdout]
 ```
 
@@ -135,7 +135,7 @@ docker run -it --network host \
 
 ```
 querysight/
-├── cli.py              # Main CLI interface
+├── querysight.py           # Main CLI interface
 ├── utils/
 │   ├── ai_suggester.py     # AI-powered recommendations
 │   ├── cache_manager.py    # Query cache management
