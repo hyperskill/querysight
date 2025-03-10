@@ -20,8 +20,9 @@ class Config:
     CLICKHOUSE_PASSWORD: str = os.getenv('CLICKHOUSE_PASSWORD', '')
     CLICKHOUSE_DATABASE: str = os.getenv('CLICKHOUSE_DATABASE', 'default')
 
-    # Base URL configuration for API endpoints
-    BASE_URL: str = os.getenv('BASE_URL', 'http://localhost:8000')
+    # Base URL configuration for API endpoints (optional)
+    # If not provided, application should work without relying on it
+    BASE_URL: Optional[str] = os.getenv('BASE_URL')
 
     # AI Providers
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")

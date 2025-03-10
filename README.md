@@ -71,8 +71,8 @@ CLICKHOUSE_DATABASE=default
 GEMINI_API_KEY=your_gemini_key
 LLM_MODEL=gemini-1.5-flash
 
-# Base URL for API endpoints
-BASE_URL=http://localhost:8000
+# Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
 
 # Optional dbt Configuration
 DBT_PROJECT_PATH=/path/to/dbt/project
@@ -101,8 +101,8 @@ GITHUB_API_TOKEN=your_github_token
 # Specify a GitHub Marketplace model (examples below)
 LLM_MODEL=github/openrouter/llama3-70b-8192
 
-# Optional: Base URL for API endpoints
-BASE_URL=http://localhost:8000
+# Optional: Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
 
 # Optional dbt Configuration
 DBT_PROJECT_PATH=/path/to/dbt/project
@@ -138,8 +138,8 @@ CLICKHOUSE_USER=readonly_user_with_additional_permissions
 CLICKHOUSE_PASSWORD=your_password
 CLICKHOUSE_DATABASE=default
 
-# Base URL for API endpoints
-BASE_URL=http://localhost:8000
+# Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
 
 # LLM Provider (choose one or more)
 GEMINI_API_KEY=your_gemini_key

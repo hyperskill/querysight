@@ -23,6 +23,7 @@ class AISuggester:
     
     def __init__(self, data_acquisition=None):
         self.model = Config.LLM_MODEL
+        # Store base_url if provided, otherwise it will be None
         self.base_url = Config.BASE_URL
         
         # Set up environment variables for various LLM providers
@@ -239,9 +240,9 @@ class AISuggester:
                         response = self._call_gemini_llm(prompt)
                     # Default to litellm for other providers
                     else:
-                        response = completion(
-                            model=self.model,
-                            messages=[
+                        completion_args = {
+                            "model": self.model,
+                            "messages": [
                                 {
                                     "role": "system",
                                     "content": """YOU ARE A WORLD-CLASS SQL AND DBT OPTIMIZATION ADVISOR FOR **QUERYSIGHT**, SPECIALIZING IN HIGH-PERFORMANCE DATA WAREHOUSE TUNING AND SCALABLE DBT MODELING. YOUR EXPERTISE SPANS:  
@@ -295,9 +296,15 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                                 },
                                 {"role": "user", "content": prompt}
                             ],
-                            max_tokens=300,  # Increased to accommodate more detailed recommendations
-                            temperature=0.7
-                        )
+                            "max_tokens": 300,  # Increased to accommodate more detailed recommendations
+                            "temperature": 0.7
+                        }
+                        
+                        # Add api_base if base_url is provided (for custom endpoints)
+                        if self.base_url:
+                            completion_args["api_base"] = self.base_url
+                            
+                        response = completion(**completion_args)
                 except Exception as e:
                     logger.error(f"Error generating suggestions: {str(e)}")
                     continue
