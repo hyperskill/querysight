@@ -1,6 +1,6 @@
 # QuerySight: ClickHouse Log-Driven dbt Project Enhancer
 
-QuerySight is a powerful command-line tool that analyzes ClickHouse query patterns and provides intelligent optimization recommendations for dbt projects. By analyzing query logs and integrating with your dbt project, it helps identify optimization opportunities and improve query performance.
+QuerySight helps optimize dbt projects by analyzing ClickHouse query logs, identifying inefficiencies, and suggesting improvements. By analyzing query logs and integrating with your dbt project, it helps identify optimization opportunities and improve query performance.
 
 ## Key Features
 
@@ -26,25 +26,27 @@ QuerySight is a powerful command-line tool that analyzes ClickHouse query patter
   - Intelligent caching system for faster repeated analysis
   - Batch processing for large query logs
   - Progress tracking with rich CLI interface
-  - Flexible output formats (CLI, JSON, PDF)
+  - Flexible output formats (CLI, JSON)
 
 ## Prerequisites
 
 - Python 3.10+
 - ClickHouse database instance
-- OpenAI API key (for AI-powered recommendations)
-- dbt project (optional, for dbt integration features)
+- OpenAI API key (optional, for AI-powered recommendations)
+- dbt project (recommended, for dbt integration features)
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/codeium/querysight.git
+git clone https://github.com/hyperskill/querysight.git
 cd querysight
 ```
 
 2. Install dependencies:
 ```bash
+python -m venv venv
+source venv/bin/activate  # (or `venv\Scripts\activate` on Windows)
 pip install -r requirements.txt
 ```
 
@@ -53,14 +55,14 @@ pip install -r requirements.txt
 Create a `.env` file with your configuration (or copy from `.env.example`):
 
 ```bash
-# ClickHouse Connection
+# ClickHouse Connection, QuerySight needs read-only permissions for system schema and users schemas
 CLICKHOUSE_HOST=localhost
 CLICKHOUSE_PORT=9000
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your_password
 CLICKHOUSE_DATABASE=default
 
-# OpenAI Configuration
+# OpenAI API Key (optional, only needed for AI-powered suggestions)
 OPENAI_API_KEY=your_openai_key
 
 # Optional dbt Configuration
@@ -72,7 +74,7 @@ DBT_PROJECT_PATH=/path/to/dbt/project
 ### Analysis Command
 
 ```bash
-python cli.py analyze [OPTIONS]
+python querysight.py analyze [OPTIONS]
 
 Analysis Options:
   --days INTEGER              Analysis timeframe [default: 7]
@@ -86,7 +88,7 @@ Filtering Options:
   --include-users TEXT       Include specific users (comma-separated)
   --exclude-users TEXT       Exclude specific users (comma-separated)
   --query-kinds TEXT         Filter by query kinds (SELECT,INSERT,etc)
-  --select-patterns TEXT     Filter specific patterns
+  --select-patterns TEXT     Filter specific patterns by pattern_id (pattern_id is getting created at the first analysis step, you can select patterns of interest on the next steps
   --select-tables TEXT       Filter specific tables
   --select-models TEXT       Filter specific dbt models
 
@@ -108,7 +110,7 @@ Analysis Level:
 Export analysis results to JSON format:
 
 ```bash
-python cli.py export [OPTIONS]
+python querysight.py export [OPTIONS]
   --output TEXT    Output file path [default: stdout]
 ```
 
@@ -135,7 +137,7 @@ docker run -it --network host \
 
 ```
 querysight/
-├── cli.py              # Main CLI interface
+├── querysight.py           # Main CLI interface
 ├── utils/
 │   ├── ai_suggester.py     # AI-powered recommendations
 │   ├── cache_manager.py    # Query cache management
