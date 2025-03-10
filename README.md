@@ -39,7 +39,7 @@ QuerySight is a powerful command-line tool that analyzes ClickHouse query patter
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/codeium/querysight.git
+git clone https://github.com/hyperskill/querysight.git
 cd querysight
 ```
 
