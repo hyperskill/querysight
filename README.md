@@ -50,6 +50,82 @@ source venv/bin/activate  # (or `venv\Scripts\activate` on Windows)
 pip install -r requirements.txt
 ```
 
+## Getting Started
+
+QuerySight now supports multiple free LLM providers to ensure the tool is accessible without requiring paid API subscriptions. Follow these steps to get started quickly:
+
+### Option 1: Using Google's Gemini 1.5 Flash (Free Tier)
+
+1. Get a free Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Set up your configuration in `.env`:
+
+```bash
+# ClickHouse Connection
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PORT=9000
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=your_password
+CLICKHOUSE_DATABASE=default
+
+# Gemini API Key (free tier)
+GEMINI_API_KEY=your_gemini_key
+LLM_MODEL=gemini-1.5-flash
+
+# Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
+
+# Optional dbt Configuration
+DBT_PROJECT_PATH=/path/to/dbt/project
+```
+
+3. Run your first analysis:
+```bash
+python querysight.py analyze --days 3
+```
+
+### Option 2: Using GitHub Marketplace Models (Free Tier)
+
+1. Generate a GitHub personal access token with appropriate scopes from [GitHub Settings](https://github.com/settings/tokens)
+2. Set up your configuration in `.env`:
+
+```bash
+# Required configuration
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PORT=9000
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=your_password
+CLICKHOUSE_DATABASE=default
+
+# GitHub API token for GitHub Marketplace Models
+GITHUB_API_TOKEN=your_github_token
+# Specify a GitHub Marketplace model (examples below)
+LLM_MODEL=github/openrouter/llama3-70b-8192
+
+# Optional: Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
+
+# Optional dbt Configuration
+DBT_PROJECT_PATH=/path/to/dbt/project
+```
+
+3. Available GitHub Marketplace Models:
+   - `github/openrouter/llama3-70b-8192` - Llama 3 70B (powerful and free)
+   - `github/mistral/mistral-7b` - Mistral 7B (fast and efficient)
+   - `github/codestral/codestral-22b` - Codestral 22B (optimized for code)
+   
+Rate limits depend on your GitHub account tier (Free/Pro/Team/Enterprise).
+
+### Additional Free LLM Providers
+
+You can use any of these additional free LLM providers by setting the appropriate API key and model name:
+
+| Provider | Environment Variable | Model Example | URL | Notes |
+|----------|---------------------|---------------|-----|-------|
+| Gemini   | GEMINI_API_KEY      | gemini-1.5-flash | [Google AI Studio](https://aistudio.google.com) | Free tier available |
+| HuggingFace | HUGGINGFACE_API_KEY | huggingface/... | [HuggingFace](https://huggingface.co) | Free API credits |
+| Together.ai | Set via litellm | together/... | [Together](https://together.ai) | Free credits |
+| Groq | Set via litellm | groq/... | [Groq](https://console.groq.com) | Fast inference |
+
 ## Configuration
 
 Create a `.env` file with your configuration (or copy from `.env.example`):
@@ -58,12 +134,31 @@ Create a `.env` file with your configuration (or copy from `.env.example`):
 # ClickHouse Connection, QuerySight needs read-only permissions for system schema and users schemas
 CLICKHOUSE_HOST=localhost
 CLICKHOUSE_PORT=9000
-CLICKHOUSE_USER=default
+CLICKHOUSE_USER=readonly_user_with_additional_permissions
 CLICKHOUSE_PASSWORD=your_password
 CLICKHOUSE_DATABASE=default
 
-# OpenAI API Key (optional, only needed for AI-powered suggestions)
+# Base URL for API endpoints (optional)
+# BASE_URL=http://localhost:8000
+
+# LLM Provider (choose one or more)
+GEMINI_API_KEY=your_gemini_key
+GITHUB_API_TOKEN=your_github_token
 OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+HUGGINGFACE_API_KEY=your_huggingface_key
+LITELLM_API_KEY=your_litellm_key
+
+# Specify which model to use (select one)
+LLM_MODEL=gemini-1.5-flash
+# LLM_MODEL=github/openrouter/llama3-70b-8192
+# LLM_MODEL=openai/gpt-4o-mini
+
+# Cache TTL settings (in seconds)
+CACHE_TTL_DEFAULT=3600       # 1 hour for default data
+CACHE_TTL_PATTERNS=43200     # 12 hours for query patterns
+CACHE_TTL_MODELS=86400       # 24 hours for dbt models
+CACHE_TTL_AI=604800          # 1 week for AI responses
 
 # Optional dbt Configuration
 DBT_PROJECT_PATH=/path/to/dbt/project

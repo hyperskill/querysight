@@ -2,8 +2,11 @@ from typing import List, Dict, Any, Optional
 from litellm import completion
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 import os
+import requests
+from urllib.parse import urljoin
+import logging
 from .models import (
     QueryPattern,
     DBTModel,
@@ -20,6 +23,10 @@ class AISuggester:
     
     def __init__(self, data_acquisition=None):
         self.model = Config.LLM_MODEL
+        # Store base_url if provided, otherwise it will be None
+        self.base_url = Config.BASE_URL
+        
+        # Set up environment variables for various LLM providers
         if hasattr(Config, 'OPENAI_API_KEY') and Config.OPENAI_API_KEY:
             os.environ["OPENAI_API_KEY"] = Config.OPENAI_API_KEY
         if hasattr(Config, 'ANTHROPIC_API_KEY') and Config.ANTHROPIC_API_KEY:
@@ -30,6 +37,10 @@ class AISuggester:
             os.environ["DEEPSEEK_API_KEY"] = Config.DEEPSEEK_API_KEY
         if hasattr(Config, 'LITELLM_API_KEY') and Config.LITELLM_API_KEY:
             os.environ["LITELLM_API_KEY"] = Config.LITELLM_API_KEY
+        if hasattr(Config, 'GEMINI_API_KEY') and Config.GEMINI_API_KEY:
+            os.environ["GEMINI_API_KEY"] = Config.GEMINI_API_KEY
+        if hasattr(Config, 'GITHUB_API_TOKEN') and Config.GITHUB_API_TOKEN:
+            os.environ["GITHUB_API_TOKEN"] = Config.GITHUB_API_TOKEN
             
         self.data_acquisition = data_acquisition
 
@@ -221,12 +232,20 @@ class AISuggester:
                     continue
                 
                 try:
-                    response = completion(
-                        model=self.model,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": """YOU ARE A WORLD-CLASS SQL AND DBT OPTIMIZATION ADVISOR FOR **QUERYSIGHT**, SPECIALIZING IN HIGH-PERFORMANCE DATA WAREHOUSE TUNING AND SCALABLE DBT MODELING. YOUR EXPERTISE SPANS:  
+                    # Check if using GitHub Marketplace models
+                    if "github" in self.model.lower():
+                        response = self._call_github_models_api(prompt)
+                    # Check if using Gemini model
+                    elif "gemini" in self.model.lower():
+                        response = self._call_gemini_llm(prompt)
+                    # Default to litellm for other providers
+                    else:
+                        completion_args = {
+                            "model": self.model,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": """YOU ARE A WORLD-CLASS SQL AND DBT OPTIMIZATION ADVISOR FOR **QUERYSIGHT**, SPECIALIZING IN HIGH-PERFORMANCE DATA WAREHOUSE TUNING AND SCALABLE DBT MODELING. YOUR EXPERTISE SPANS:  
 
 1. **CLICKHOUSE QUERY OPTIMIZATION** – Enhancing execution speed, indexing strategies, and partitioning.  
 2. **DBT MODEL DESIGN & MATERIALIZATION** – Optimizing model structure, incremental logic, and caching strategies.  
@@ -274,18 +293,31 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
 - **KEEP RESPONSES CONCISE, TECHNICAL, AND IMPLEMENTATION-FOCUSED.**  
 - **STRUCTURE RECOMMENDATIONS CLEARLY FOR EASY IMPLEMENTATION.**  
 - **ENSURE EVERY PROPOSAL ENHANCES PERFORMANCE & MAINTAINS DATA INTEGRITY.**"""
-                            },
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=300,  # Increased to accommodate more detailed recommendations
-                        temperature=0.7
-                    )
+                                },
+                                {"role": "user", "content": prompt}
+                            ],
+                            "max_tokens": 300,  # Increased to accommodate more detailed recommendations
+                            "temperature": 0.7
+                        }
+                        
+                        # Add api_base if base_url is provided (for custom endpoints)
+                        if self.base_url:
+                            completion_args["api_base"] = self.base_url
+                            
+                        response = completion(**completion_args)
                 except Exception as e:
                     logger.error(f"Error generating suggestions: {str(e)}")
                     continue
                 
                 # Parse response into structured format
-                suggestion = response.choices[0].message.content.strip()
+                if hasattr(response, 'choices') and response.choices:
+                    suggestion = response.choices[0].message.content.strip()
+                elif isinstance(response, dict) and 'content' in response:
+                    suggestion = response['content'].strip()
+                else:
+                    logger.error(f"Unexpected response format: {response}")
+                    continue
+                
                 parts = suggestion.split('\n')
                 
                 def extract_section(marker: str) -> str:
@@ -379,3 +411,246 @@ WHEN IDENTIFYING OPPORTUNITIES FOR DBT MODELING:
                 continue
         
         return recommendations
+
+    def _call_github_models_api(self, prompt: str) -> dict:
+        """Call GitHub Marketplace Models API endpoints"""
+        # GitHub API token should be set in environment variables
+        github_token = os.environ.get("GITHUB_API_TOKEN")
+        
+        if not github_token:
+            raise ValueError("GitHub API token is required for GitHub Marketplace models")
+        
+        # GitHub Models API endpoints
+        # Documentation: https://docs.github.com/en/github-models/prototyping-with-ai-models
+        api_url = "https://api.github.com/models/chat"
+        
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json"
+        }
+        
+        system_prompt = "You are a world-class SQL and DBT optimization advisor for ClickHouse databases."
+        
+        payload = {
+            "model": "github/openrouter/llama3-70b-8192",  # Default model can be overridden
+            "messages": [
+                {
+                    "role": "system", 
+                    "content": system_prompt
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "top_p": 1,
+            "max_tokens": 300
+        }
+        
+        # Extract model name if specified in self.model (format: github/provider/model-name)
+        if self.model.startswith("github/"):
+            model_parts = self.model.split("/")
+            if len(model_parts) >= 3:
+                payload["model"] = self.model
+        
+        # Use connection pooling for efficient API requests
+        session = requests.Session()
+        
+        try:
+            response = session.post(api_url, headers=headers, json=payload)
+            response.raise_for_status()
+            response_json = response.json()
+            
+            # Cache successful API responses
+            self._cache_api_response("github_models", prompt, response_json, Config.CACHE_TTL_AI)
+            
+            # Extract content from the response based on GitHub Models API format
+            if "choices" in response_json and response_json["choices"]:
+                content = response_json["choices"][0]["message"]["content"]
+                return {"content": content}
+            else:
+                logger.error(f"Unexpected GitHub Models API response format: {response_json}")
+                return {
+                    "content": "Unable to generate optimization suggestions due to API response format error."
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error calling GitHub Models API: {str(e)}")
+            # Try to get cached response if available
+            cached_response = self._get_cached_response("github_models", prompt)
+            if cached_response:
+                logger.info("Retrieved cached GitHub Models API response")
+                return cached_response
+                
+            # Fallback to a simple response format for compatibility
+            return {
+                "content": "Unable to generate optimization suggestions due to API error. "
+                           "Please check your GitHub API token and try again."
+            }
+    
+    def _call_gemini_llm(self, prompt: str) -> dict:
+        """Call Google's Gemini API (Flash 1.5 has a free tier)"""
+        try:
+            # Try using Google generative AI library if available
+            from google.generativeai import GenerativeModel, configure
+            
+            # Configure the API with the key
+            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+            if not gemini_api_key:
+                raise ValueError("Gemini API key is required for Gemini models")
+                
+            configure(api_key=gemini_api_key)
+            
+            # Create the model and generate content
+            model = GenerativeModel(self.model.replace("gemini-", "") if "gemini-" in self.model else self.model)
+            system_prompt = "You are a world-class SQL and DBT optimization advisor for ClickHouse databases."
+            
+            response = model.generate_content(
+                [system_prompt, prompt],
+                generation_config={
+                    "temperature": 0.7,
+                    "max_output_tokens": 300,
+                }
+            )
+            
+            # Cache successful API response
+            self._cache_api_response("gemini", prompt, {"text": response.text}, Config.CACHE_TTL_AI)
+            
+            # Format the response to match the expected structure
+            return {
+                "content": response.text
+            }
+            
+        except ImportError:
+            # Fallback to REST API if the library is not available
+            logger.warning("Google generativeai library not found. Falling back to REST API.")
+            
+            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+            if not gemini_api_key:
+                raise ValueError("Gemini API key is required for Gemini models")
+                
+            api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+            
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            params = {
+                "key": gemini_api_key
+            }
+            
+            # Current timestamp in Unix milliseconds for Amplitude compatibility
+            current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 300
+                },
+                "metadata": {
+                    "timestamp": current_time_ms
+                }
+            }
+            
+            # Use connection pooling for efficient API requests
+            session = requests.Session()
+            
+            try:
+                response = session.post(api_url, headers=headers, params=params, json=payload)
+                response.raise_for_status()
+                response_json = response.json()
+                
+                # Cache successful API response
+                self._cache_api_response("gemini", prompt, response_json, Config.CACHE_TTL_AI)
+                
+                # Extract the content from the response
+                text = response_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                
+                return {"content": text}
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error calling Gemini API: {str(e)}")
+                
+                # Try to get cached response if available
+                cached_response = self._get_cached_response("gemini", prompt)
+                if cached_response:
+                    logger.info("Retrieved cached Gemini API response")
+                    return cached_response
+                    
+                return {
+                    "content": "Unable to generate optimization suggestions due to API error. "
+                               "Please check your Gemini API key and try again."
+                }
+    
+    def _cache_api_response(self, provider: str, prompt: str, response: dict, ttl: int) -> None:
+        """Cache API response with namespace for efficient retrieval"""
+        try:
+            # Create a unique cache key based on the provider and prompt
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+            cache_key = f"querysight:ai:{provider}:{prompt_hash}"
+            
+            # Store the response in the cache directory
+            cache_path = os.path.join(Config.CACHE_DIR, "ai_responses")
+            os.makedirs(cache_path, exist_ok=True)
+            
+            # Add timestamp for TTL calculation
+            cache_data = {
+                "timestamp": int(datetime.now(timezone.utc).timestamp()),
+                "ttl": ttl,
+                "response": response
+            }
+            
+            cache_file = os.path.join(cache_path, f"{cache_key}.json")
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f)
+                
+            logger.debug(f"Cached {provider} API response with key {cache_key}")
+            
+        except Exception as e:
+            logger.error(f"Error caching API response: {str(e)}")
+    
+    def _get_cached_response(self, provider: str, prompt: str) -> Optional[dict]:
+        """Retrieve cached API response if available and not expired"""
+        try:
+            # Create the same cache key used for storage
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+            cache_key = f"querysight:ai:{provider}:{prompt_hash}"
+            
+            cache_path = os.path.join(Config.CACHE_DIR, "ai_responses")
+            cache_file = os.path.join(cache_path, f"{cache_key}.json")
+            
+            if not os.path.exists(cache_file):
+                return None
+                
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+                
+            # Check if the cache entry has expired
+            stored_time = cache_data.get("timestamp", 0)
+            ttl = cache_data.get("ttl", Config.CACHE_TTL_AI)
+            current_time = int(datetime.now(timezone.utc).timestamp())
+            
+            if current_time - stored_time > ttl:
+                logger.debug(f"Cache entry {cache_key} has expired")
+                return None
+                
+            # Return the cached response in the expected format
+            if "response" in cache_data:
+                if provider == "gemini" and "text" in cache_data["response"]:
+                    return {"content": cache_data["response"]["text"]}
+                elif "content" in cache_data["response"]:
+                    return {"content": cache_data["response"]["content"]}
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error retrieving cached response: {str(e)}")
+            return None

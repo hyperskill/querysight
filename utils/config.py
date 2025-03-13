@@ -20,13 +20,27 @@ class Config:
     CLICKHOUSE_PASSWORD: str = os.getenv('CLICKHOUSE_PASSWORD', '')
     CLICKHOUSE_DATABASE: str = os.getenv('CLICKHOUSE_DATABASE', 'default')
 
+    # Base URL configuration for API endpoints (optional)
+    # If not provided, application should work without relying on it
+    BASE_URL: Optional[str] = os.getenv('BASE_URL')
+
     # AI Providers
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
     HUGGINGFACE_API_KEY: Optional[str] = os.getenv("HUGGINGFACE_API_KEY")
     DEEPSEEK_API_KEY: Optional[str] = os.getenv("DEEPSEEK_API_KEY")
     LITELLM_API_KEY: Optional[str] = os.getenv("LITELLM_API_KEY")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+    # GitHub Models API token (for GitHub Marketplace models)
+    GITHUB_API_TOKEN: Optional[str] = os.getenv("GITHUB_API_TOKEN")
+    # Default to Gemini Flash 1.5 (free tier) if no model specified
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+    
+    # Cache TTL settings (in seconds) for different types of data
+    CACHE_TTL_DEFAULT: int = int(os.getenv("CACHE_TTL_DEFAULT", "3600"))  # 1 hour
+    CACHE_TTL_PATTERNS: int = int(os.getenv("CACHE_TTL_PATTERNS", "43200"))  # 12 hours
+    CACHE_TTL_MODELS: int = int(os.getenv("CACHE_TTL_MODELS", "86400"))  # 24 hours
+    CACHE_TTL_AI: int = int(os.getenv("CACHE_TTL_AI", "604800"))  # 1 week
 
     # DBT configuration
     DBT_PROJECT_PATH: str = os.getenv('DBT_PROJECT_PATH', '')
